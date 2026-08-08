@@ -1,0 +1,9 @@
+/target
+*.txt
+!README*
+*.csv
+
+# Holds API keys
+.env
+.env.*
+!.env.example

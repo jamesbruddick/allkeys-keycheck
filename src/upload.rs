@@ -1,0 +1,141 @@
+//! Submitting confirmed keys to allkeys.directory.
+//!
+//! Uploading a private key hands over spending authority and cannot be undone,
+//! so this never runs unless `--upload` asks for it explicitly.
+
+use std::thread::sleep;
+use std::time::Duration;
+
+use serde::Deserialize;
+
+use crate::ui::Ui;
+
+const ENDPOINT: &str = "https://allkeys.directory/api/v1/found-keys";
+
+/// The server rejects more than 250 keys in one request.
+const MAX_KEYS_PER_REQUEST: usize = 250;
+
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Transient failures retry this many times before the upload is abandoned.
+/// Unlike the balance lookup, this one is bounded: a stuck upload should stop
+/// and let you retry deliberately rather than hold the keys in a loop forever.
+const MAX_ATTEMPTS: u32 = 8;
+
+#[derive(Debug, Deserialize)]
+struct SubmitResponse {
+    #[serde(default)]
+    new_finds: Vec<NewFind>,
+    #[serde(default)]
+    already_found: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NewFind {
+    key_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiError {
+    error: ErrorBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorBody {
+    code: String,
+    message: String,
+}
+
+#[derive(Default)]
+pub struct Summary {
+    pub accepted: Vec<String>,
+    pub already_known: usize,
+}
+
+/// Send every key in batches. Returns once all of them have been accepted, or
+/// aborts with the server's own error message if the request was rejected.
+pub fn submit(keys: &[String], token: &str, ui: &Ui) -> Result<Summary, String> {
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .user_agent("allkeys-keycheck/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut summary = Summary::default();
+    let batches: Vec<&[String]> = keys.chunks(MAX_KEYS_PER_REQUEST).collect();
+
+    for (index, chunk) in batches.iter().enumerate() {
+        ui.progress(index * MAX_KEYS_PER_REQUEST, keys.len(), "uploading");
+        let response = send(&http, chunk, token, ui)?;
+        summary
+            .accepted
+            .extend(response.new_finds.into_iter().map(|f| f.key_hex));
+        summary.already_known += response.already_found.len();
+    }
+    ui.progress(keys.len(), keys.len(), "done");
+    ui.clear();
+
+    Ok(summary)
+}
+
+/// One batch, with retries. Rejections that a retry cannot fix — a bad key, a
+/// bad token — fail immediately with the server's wording.
+fn send(
+    http: &reqwest::blocking::Client,
+    keys: &[String],
+    token: &str,
+    ui: &Ui,
+) -> Result<SubmitResponse, String> {
+    let body = serde_json::json!({ "keys": keys });
+    let mut backoff = Duration::from_secs(2);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let outcome = http
+            .post(ENDPOINT)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .map_err(|e| format!("request failed ({e})"));
+
+        let retry_message = match outcome {
+            Ok(response) => {
+                let status = response.status();
+                let text = response.text().unwrap_or_default();
+
+                if status.is_success() {
+                    return serde_json::from_str(&text)
+                        .map_err(|e| format!("could not parse upload response ({e}): {text}"));
+                }
+
+                let detail = serde_json::from_str::<ApiError>(&text)
+                    .map(|e| format!("{} ({})", e.error.message, e.error.code))
+                    .unwrap_or_else(|_| text.trim().chars().take(160).collect());
+
+                // 429 and 503 are the documented retryable cases; every other
+                // 4xx means the request itself is wrong and will stay wrong.
+                let retryable =
+                    status.as_u16() == 429 || status.as_u16() == 503 || status.is_server_error();
+                if !retryable {
+                    return Err(format!("upload rejected: {detail}"));
+                }
+                format!("HTTP {status}: {detail}")
+            }
+            Err(e) => e,
+        };
+
+        if attempt == MAX_ATTEMPTS {
+            return Err(format!(
+                "upload failed after {MAX_ATTEMPTS} attempts — {retry_message}. \
+                 Your keys are saved locally; re-run with --upload to try again."
+            ));
+        }
+        ui.warn(&format!(
+            "{retry_message} — retrying in {}s",
+            backoff.as_secs()
+        ));
+        sleep(backoff);
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+
+    unreachable!("loop returns on the final attempt")
+}
