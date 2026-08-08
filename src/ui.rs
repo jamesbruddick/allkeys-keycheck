@@ -104,12 +104,14 @@ impl Ui {
     /// The leading clear keeps a warning from landing on top of a progress bar.
     pub fn warn(&self, text: &str) {
         let padded = format!("{:>GUTTER$}", "warning");
-        let label = if self.interactive {
-            format!("\r\x1b[K{YELLOW}{padded}{RESET}")
+        // The clear goes before the margin: `\r` returns to column 0 and would
+        // otherwise erase the two leading spaces.
+        let (clear, label) = if self.interactive {
+            ("\r\x1b[K", format!("{YELLOW}{padded}{RESET}"))
         } else {
-            padded
+            ("", padded)
         };
-        eprintln!("  {label}  {text}");
+        eprintln!("{clear}  {label}  {text}");
     }
 
     pub fn error(&self, text: &str) {

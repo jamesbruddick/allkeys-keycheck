@@ -66,7 +66,7 @@ Copy `.env.example` to `.env` and fill it in:
 
 ```sh
 cp .env.example .env
-chmod 600 .env
+chmod 600 .env   # restrict it to your user — the file holds your API keys
 ```
 
 ```ini
@@ -81,7 +81,8 @@ instead; naming one that doesn't exist is an error, while simply having no
 
 Precedence is **command-line flag → real environment variable → `.env`**, so a
 stale file never overrides a variable you set deliberately. `.env` is
-gitignored, and the tool warns if it is readable by other users.
+gitignored, and each run warns — naming the file — if it is readable by other
+users.
 
 ## Uploading to allkeys.directory
 

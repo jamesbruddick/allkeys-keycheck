@@ -105,7 +105,10 @@ fn run(args: &Args, ui: &Ui, loaded: &envfile::Loaded) -> Result<(), String> {
     if let envfile::Loaded::File(path) = loaded {
         ui.row("config", &path.display().to_string());
         if envfile::is_world_readable(path) {
-            ui.warn("that file is readable by other users — chmod 600 it");
+            ui.warn(&format!(
+                "{} is readable by other users; restrict it with chmod 600",
+                path.display()
+            ));
         }
     }
 
