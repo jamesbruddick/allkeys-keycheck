@@ -4,6 +4,7 @@
 mod api;
 mod envfile;
 mod hd;
+mod http;
 mod keys;
 mod outfile;
 mod ui;
@@ -33,7 +34,13 @@ const MAX_LISTED_REJECTS: usize = 5;
 const MAX_LISTED_ADDRESSES: usize = 32;
 
 #[derive(Parser)]
-#[command(about = "Find which private keys and mnemonics control used Bitcoin addresses")]
+// `version` so a downloaded binary can say what it is: the run banner prints
+// it, but that needs an input file, and someone holding an archive they
+// unpacked a week ago wants the answer without starting a scan.
+#[command(
+    version,
+    about = "Find which private keys and mnemonics control used Bitcoin addresses"
+)]
 struct Args {
     /// Text file with one per line: a hex private key, or a BIP39 mnemonic
     /// phrase of 12, 15, 18, 21 or 24 words. Treated as a queue: it is emptied

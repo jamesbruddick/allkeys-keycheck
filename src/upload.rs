@@ -55,11 +55,7 @@ pub struct Summary {
 /// Send every key in batches. Returns once all of them have been accepted, or
 /// aborts with the server's own error message if the request was rejected.
 pub fn submit(keys: &[String], token: &str, ui: &Ui) -> Result<Summary, String> {
-    let http = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .user_agent("allkeys-keycheck/0.1")
-        .build()
-        .map_err(|e| e.to_string())?;
+    let http = crate::http::client()?;
 
     let mut summary = Summary::default();
     let batches: Vec<&[String]> = keys.chunks(MAX_KEYS_PER_REQUEST).collect();
@@ -124,9 +120,13 @@ fn send(
         };
 
         if attempt == MAX_ATTEMPTS {
+            // What is true whether or not `-o` was given: the input file is only
+            // emptied once every destination has taken its copy, and this
+            // failure returns well before that. Promising a local file here
+            // would be a lie to anyone uploading without one.
             return Err(format!(
                 "upload failed after {MAX_ATTEMPTS} attempts — {retry_message}. \
-                 Your keys are saved locally; re-run with --upload to try again."
+                 The input file was left as it was, so the run can be repeated."
             ));
         }
         ui.warn(&format!(

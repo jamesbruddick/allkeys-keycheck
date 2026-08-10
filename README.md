@@ -5,11 +5,30 @@ derives every address they control, checks them against the blockchain.info
 balance API, and writes out the ones that have on-chain activity —
 de-duplicated.
 
-## Usage
+## Install
+
+Download the zip for your system from the
+[latest release](https://github.com/jamesbruddick/allkeys-keycheck/releases/latest)
+— `macos-arm64` for Apple Silicon, `macos-amd64` for Intel Macs,
+`linux-amd64` or `linux-arm64`, or `windows-amd64`. Inside is the binary,
+ready to run, with `.env.example` to copy to `.env` if you need API keys:
+
+```sh
+unzip allkeys-keycheck-macos-arm64.zip
+cd allkeys-keycheck-macos-arm64
+./allkeys-keycheck --version
+```
+
+Or build it from source, which needs Rust 1.87 or newer:
 
 ```sh
 cargo build --release
-./target/release/allkeys-keycheck keys.txt -o active-keys.txt
+```
+
+## Usage
+
+```sh
+./allkeys-keycheck keys.txt -o active-keys.txt
 ```
 
 A run must have somewhere to put its results: **`-o`, `-u`, or both**.

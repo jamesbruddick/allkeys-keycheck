@@ -1,0 +1,198 @@
+name: Release
+
+# Only a version bump publishes; every other push to main is ignored.
+on:
+  push:
+    branches: [main]
+    paths: ['Cargo.toml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  BIN: allkeys-keycheck
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changed: ${{ steps.version.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - id: version
+        name: Compare the package version against the parent commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          read_version() { grep -m1 '^version' | sed -E 's/.*"(.*)".*/\1/'; }
+          new=$(read_version < Cargo.toml)
+          old=$(git show HEAD^:Cargo.toml | read_version || true)
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+
+          if [ "$old" = "$new" ]; then
+            echo "Version unchanged at $new; nothing to release."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          elif gh api "repos/$REPO/git/ref/tags/v$new" >/dev/null 2>&1; then
+            # A revert-and-reapply can re-present a version that is already tagged.
+            echo "Tag v$new already exists; nothing to release."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version $old -> $new; releasing."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        # `target` is the triple cargo needs; `label` is what the download is
+        # called. Someone choosing a file on the releases page is answering
+        # "which machine do I have", and `x86_64-pc-windows-msvc` answers a
+        # different question — it names a toolchain they never asked about.
+        include:
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            label: linux-arm64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: linux-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            label: macos-amd64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-amd64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # TLS is rustls, so no target here needs a system OpenSSL. The crypto
+      # provider underneath it is aws-lc-rs, which does need a C toolchain —
+      # present on every one of these runners. Each leg builds on its own
+      # architecture except macos-amd64, which cross-compiles from the arm64
+      # runner against the same universal Apple SDK.
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # The system is named on the zip, so the binary inside does not have to
+      # repeat it — you unzip `allkeys-keycheck-linux-arm64.zip` and get
+      # `allkeys-keycheck`, which is the name it is run and documented under.
+      # Zip stores the unix mode, so it comes out executable with no chmod.
+      # Everything sits under one directory rather than at the archive root:
+      # unzipping in a full Downloads folder should not scatter three files
+      # into it. The version is left off — the release already carries it, and
+      # the binary answers --version.
+      - name: Package the binary
+        shell: bash
+        run: |
+          name="$BIN-${{ matrix.label }}"
+          mkdir -p "dist/$name"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/$BIN.exe" "dist/$name/"
+          else
+            cp "target/${{ matrix.target }}/release/$BIN" "dist/$name/"
+          fi
+          # .env.example travels with it: --upload needs API keys, and the
+          # names of those variables should not require a trip back to the
+          # repository to find.
+          cp README.md LICENSE .env.example "dist/$name/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$name.zip" "$name" >/dev/null
+          else
+            zip -r -q "$name.zip" "$name"
+          fi
+          rm -rf "$name"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      # Provenance is signed with a workflow OIDC identity, so anyone can prove
+      # an archive came from this repository at this commit rather than from
+      # someone's laptop. Worth having on a tool that handles private keys.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.check.outputs.version }}
+          name: v${{ needs.check.outputs.version }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            Download the zip for your system and unpack it. Inside is the
+            binary, `allkeys-keycheck`, the README, the licence, and
+            `.env.example` — copy that to `.env` to set your API keys.
+
+            **macOS / Linux** — the binary unzips ready to run, no `chmod`:
+
+            ```sh
+            unzip allkeys-keycheck-macos-arm64.zip
+            cd allkeys-keycheck-macos-arm64
+            ./allkeys-keycheck --version
+            ```
+
+            **Windows** — unzip and run `allkeys-keycheck.exe`.
+
+            | file | for |
+            | --- | --- |
+            | `allkeys-keycheck-macos-arm64.zip` | Apple Silicon Macs (M1 and later) |
+            | `allkeys-keycheck-macos-amd64.zip` | Intel Macs |
+            | `allkeys-keycheck-linux-amd64.zip` | Linux on Intel or AMD |
+            | `allkeys-keycheck-linux-arm64.zip` | Linux on ARM — Raspberry Pi, Graviton |
+            | `allkeys-keycheck-windows-amd64.zip` | Windows |
+
+            Every file is signed with build provenance, so you can confirm it
+            was built by this workflow from this source and not by someone else:
+
+            ```sh
+            gh attestation verify allkeys-keycheck-macos-arm64.zip --repo ${{ github.repository }}
+            ```
+
+            Released under the [MIT License](https://github.com/${{ github.repository }}/blob/v${{ needs.check.outputs.version }}/LICENSE).

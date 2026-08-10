@@ -79,13 +79,8 @@ pub fn batches(addresses: &[String], max_count: usize) -> Vec<&[String]> {
 
 impl<'a> Client<'a> {
     pub fn new(delay_ms: u64, api_key: Option<String>, ui: &'a Ui) -> Result<Self, String> {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .user_agent("allkeys-keycheck/0.1")
-            .build()
-            .map_err(|e| e.to_string())?;
         Ok(Self {
-            http,
+            http: crate::http::client()?,
             delay: Duration::from_millis(delay_ms),
             api_key,
             ui,
