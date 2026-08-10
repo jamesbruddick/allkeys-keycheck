@@ -33,90 +33,145 @@ const MAX_LISTED_REJECTS: usize = 5;
 /// than printing every line — a single mnemonic can derive tens of thousands.
 const MAX_LISTED_ADDRESSES: usize = 32;
 
+/// Examples and the one rule a first run can trip over. Shown under both `-h`
+/// and `--help`: someone reaching for the short form is usually after the
+/// invocation, not the prose.
+const EXAMPLES: &str = "\
+Examples:
+  allkeys-keycheck keys.txt -o found.txt   scan, save what has activity
+  allkeys-keycheck keys.txt -u             scan, submit to allkeys.directory
+  allkeys-keycheck keys.txt --dry-run      derive addresses, contact no network
+
+Results need somewhere to go: pass -o, -u, or both, unless --dry-run.";
+
 #[derive(Parser)]
 // `version` so a downloaded binary can say what it is: the run banner prints
 // it, but that needs an input file, and someone holding an archive they
 // unpacked a week ago wants the answer without starting a scan.
+//
+// Every long_help below is the short line plus the detail a run can go wrong
+// without — what is irreversible, what is emptied, what a value means. The
+// rest lives in the README, which has room to explain it.
 #[command(
     version,
-    about = "Find which private keys and mnemonics control used Bitcoin addresses"
+    about = "Find which Bitcoin private keys and BIP39 mnemonic phrases have active addresses",
+    long_about = "Find which Bitcoin private keys and BIP39 mnemonic phrases have active \
+        addresses.\n\n\
+        Give it a text file of keys and phrases. It derives every address each one controls — \
+        five address formats, and for a phrase thousands of derivation paths — looks them up on \
+        blockchain.info, and reports the secrets whose addresses have been used, whether or not \
+        they still hold coins.\n\n\
+        Only the derived addresses are sent. Your keys and phrases stay on this machine unless \
+        you pass --upload.",
+    after_help = EXAMPLES,
+    after_long_help = EXAMPLES
 )]
 struct Args {
-    /// Text file with one per line: a hex private key, or a BIP39 mnemonic
-    /// phrase of 12, 15, 18, 21 or 24 words. Treated as a queue: it is emptied
-    /// once the results have reached everywhere they were asked to go, so the
-    /// next run starts on new material. `--dry-run` leaves it alone.
+    /// Text file of secrets to scan, one per line
+    ///
+    /// Each line is a hex private key or a BIP39 phrase of 12, 15, 18, 21 or 24
+    /// words. Blank lines and `#` comments are skipped.
+    ///
+    /// The file is a queue: a successful run empties it, so the next run starts
+    /// on new material. Keep anything you want to scan twice elsewhere.
+    /// `--dry-run` leaves it alone.
+    #[arg(value_name = "FILE")]
     input: PathBuf,
 
-    /// Which indices of each mnemonic chain to scan first. A bare count is
-    /// shorthand for both ends — `10` means `0..10,2147483638..`, because the
-    /// index space runs to 2^31-1 and a wallet parked at the far end of it is
-    /// invisible to a scan that only walks forward from zero. A count is only a
-    /// starting point: an end that turns up activity is followed four hundred
-    /// indices at a time until a round comes back empty. Pass explicit windows
-    /// instead to scan exactly what you name and nothing more — a
-    /// comma-separated list like `10..110`, `2147483548..2147483638` for the
-    /// last hundred without the final ten, or `400000..500000` for one shard of
-    /// a scan too big for a single pass. An omitted start means 0 and an
-    /// omitted end means the end of the space.
-    #[arg(short, long, default_value = "10", value_name = "N|START..END,...")]
+    /// Which indices of each mnemonic chain to scan: a count, or windows
+    /// like 10..110
+    ///
+    /// A bare count scans that many indices at each end of the chain: `10`
+    /// means `0..10` and the last ten. Both ends, because the index space runs
+    /// to 2^31-1 and a wallet parked at the top of it is invisible to a scan
+    /// that only walks forward from zero.
+    ///
+    /// A count is a starting point — an end that turns up activity is followed
+    /// four hundred indices at a time until a round comes back empty. Give
+    /// explicit windows instead to scan exactly what you name and nothing more:
+    /// `10..110`, or `400000..500000` for one shard of a larger scan. An
+    /// omitted start means 0, an omitted end means the end of the space.
+    // A plain placeholder, with the two forms named in the line above instead:
+    // spelling the grammar out here made this the widest option in the list,
+    // and the widest option sets the description column for every other one.
+    #[arg(short, long, default_value = "10", value_name = "RANGE")]
     range: hd::Span,
 
-    /// BIP39 passphrase — the optional 25th word. A different one turns the
-    /// same phrase into an entirely different wallet.
-    // Prefer the env var or .env: a passphrase on the command line lands in
-    // your shell history and in the process list.
+    /// BIP39 passphrase, the optional 25th word
+    ///
+    /// A different passphrase turns the same phrase into an entirely different
+    /// wallet. Prefer the environment variable or a .env file: a passphrase on
+    /// the command line lands in your shell history and in the process list.
     #[arg(
         long,
         env = "BIP39_PASSPHRASE",
         hide_env_values = true,
-        default_value = ""
+        default_value = "",
+        value_name = "WORD"
     )]
     passphrase: String,
 
-    /// Write the secrets that have activity to this file, one per line — for a
-    /// mnemonic, both the child keys that hit and the phrase itself, which
-    /// sorts below the keys. An existing
-    /// file is merged into, never replaced, so runs accumulate and a repeat of
-    /// one cannot lose what an earlier one found. Omit it to skip the file
-    /// entirely — useful alongside --upload.
-    #[arg(short, long)]
+    /// Merge the secrets that have activity into this file
+    ///
+    /// One per line; for a mnemonic, both the child keys that hit and the
+    /// phrase itself. An existing file is merged into, never replaced, so runs
+    /// accumulate and a repeat cannot lose what an earlier one found.
+    ///
+    /// Omit it to write nothing to disk — useful alongside --upload.
+    #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 
-    /// Maximum addresses per API request. Batches are additionally capped by
-    /// request body size, which is the limit the server actually enforces.
-    #[arg(long, default_value_t = 1500)]
+    /// Maximum addresses per API request
+    ///
+    /// Batches are additionally capped by request body size, which is the limit
+    /// the server actually enforces.
+    #[arg(long, default_value_t = 1500, value_name = "N")]
     batch: usize,
 
-    /// Milliseconds to wait between successful API requests.
-    #[arg(long, default_value_t = 0)]
+    /// Milliseconds to wait between successful API requests
+    #[arg(long, default_value_t = 0, value_name = "MS")]
     delay: u64,
 
-    /// blockchain.info API key, if you have one (raises the rate limit).
+    /// blockchain.info API key, if you have one (raises the rate limit)
     // hide_env_values: clap prints an env var's CURRENT VALUE in --help, which
     // would put a live secret on screen and into any pasted output.
-    #[arg(long, env = "BLOCKCHAIN_API_KEY", hide_env_values = true)]
+    #[arg(
+        long,
+        env = "BLOCKCHAIN_API_KEY",
+        hide_env_values = true,
+        value_name = "KEY"
+    )]
     blockchain_api_key: Option<String>,
 
-    /// Upload the keys that were found to allkeys.directory. Off unless asked
-    /// for: this sends private keys off this machine and cannot be undone.
+    /// Submit the keys that were found to allkeys.directory
+    ///
+    /// This sends private keys off this machine and cannot be undone, so it
+    /// never happens unless you pass the flag. Only secrets with confirmed
+    /// on-chain activity are ever sent.
     #[arg(short, long)]
     upload: bool,
 
-    /// API key for allkeys.directory. Required by --upload.
-    #[arg(long, env = "ALLKEYS_API_KEY", hide_env_values = true)]
+    /// API key for allkeys.directory, required by --upload
+    #[arg(
+        long,
+        env = "ALLKEYS_API_KEY",
+        hide_env_values = true,
+        value_name = "KEY"
+    )]
     allkeys_api_key: Option<String>,
 
-    /// Read variables from this file instead of searching for a `.env`.
-    /// Loaded before the arguments below are resolved.
-    #[arg(long, value_name = "PATH")]
+    /// Read variables from this file instead of searching for a .env
+    ///
+    /// Values are read before the arguments above resolve, so a flag on the
+    /// command line still wins over the file.
+    #[arg(long, value_name = "FILE")]
     env_file: Option<PathBuf>,
 
-    /// Derive and print addresses without contacting the network.
+    /// Derive and print addresses without contacting the network
     #[arg(long)]
     dry_run: bool,
 
-    /// Disable colored output.
+    /// Disable colored output
     #[arg(long)]
     no_color: bool,
 }

@@ -3,14 +3,14 @@
 [![Release](https://img.shields.io/github/v/release/jamesbruddick/allkeys-keycheck?color=f7931a)](https://github.com/jamesbruddick/allkeys-keycheck/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Find out which Bitcoin private keys and BIP39 phrases control addresses that
-have actually been used on-chain.
+Find which Bitcoin private keys and BIP39 mnemonic phrases have active
+addresses.
 
 Give it a text file of hex private keys and mnemonic phrases. It derives every
 address each one controls — across five address formats and, for phrases,
-thousands of derivation paths — checks them against the blockchain.info balance
-API, and reports the ones with a transaction history. Findings are written to a
-file that accumulates across runs, and can optionally be submitted to
+thousands of derivation paths — looks them up on blockchain.info, and reports
+the ones with a transaction history. Findings are written to a file that
+accumulates across runs, and can optionally be submitted to
 [allkeys.directory](https://allkeys.directory).
 
 Your private keys never leave the machine during a scan. Only derived addresses
@@ -28,7 +28,7 @@ Download the zip for your system from the
 | `allkeys-keycheck-macos-arm64.zip` | Apple Silicon Macs (M1 and later) |
 | `allkeys-keycheck-macos-amd64.zip` | Intel Macs |
 | `allkeys-keycheck-linux-amd64.zip` | Linux on Intel or AMD |
-| `allkeys-keycheck-linux-arm64.zip` | Linux on ARM — Raspberry Pi, Graviton |
+| `allkeys-keycheck-linux-arm64.zip` | Linux on ARM — Raspberry Pi |
 | `allkeys-keycheck-windows-amd64.zip` | Windows |
 
 Inside is the binary, `allkeys-keycheck`, ready to run — no `chmod` needed —
@@ -69,7 +69,7 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.2.0
+  allkeys-keycheck 0.2.1
 
       scanning  keys.txt
           keys  1 unique · 1 duplicate collapsed · 1 line skipped
@@ -99,7 +99,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.2.0
+  allkeys-keycheck 0.2.1
 
       scanning  keys.txt
          input  2 unique · 1 phrase
@@ -369,7 +369,7 @@ BIP39_PASSPHRASE=
 ```
 
 The file is searched for in the current directory and its parents, so it works
-from anywhere in a project. `--env-file <path>` points at a specific file
+from anywhere in a project. `--env-file <FILE>` points at a specific file
 instead; naming one that doesn't exist is an error, while simply having no
 `.env` is not.
 
@@ -381,19 +381,19 @@ each run warns — naming the file — if it is readable by other users.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `<INPUT>` | — | Text file of keys and phrases, one per line |
-| `-o, --output <path>` | — | Merge active keys into a file |
+| `<FILE>` | — | Text file of keys and phrases, one per line |
+| `-o, --output <FILE>` | — | Merge active keys into a file |
 | `-u, --upload` | — | Submit found keys to allkeys.directory |
-| `-r, --range <n\|start..end,...>` | `10` | Which indices of each chain to scan |
-| `--passphrase <s>` | `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
-| `--batch <n>` | `1500` | Max addresses per API request |
-| `--delay <ms>` | `0` | Pause between successful API requests |
-| `--blockchain-api-key <key>` | `$BLOCKCHAIN_API_KEY` | blockchain.info key, raises the rate limit |
-| `--allkeys-api-key <key>` | `$ALLKEYS_API_KEY` | allkeys.directory key, required by `--upload` |
-| `--env-file <path>` | `.env` | Read variables from a specific file |
+| `-r, --range <RANGE>` | `10` | Which indices of each chain to scan — a count, or windows |
+| `--passphrase <WORD>` | `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
+| `--batch <N>` | `1500` | Max addresses per API request |
+| `--delay <MS>` | `0` | Pause between successful API requests |
+| `--blockchain-api-key <KEY>` | `$BLOCKCHAIN_API_KEY` | blockchain.info key, raises the rate limit |
+| `--allkeys-api-key <KEY>` | `$ALLKEYS_API_KEY` | allkeys.directory key, required by `--upload` |
+| `--env-file <FILE>` | `.env` | Read variables from a specific file |
 | `--dry-run` | — | Print derived addresses, contact no network |
 | `--no-color` | — | Disable coloured output |
-| `-h, --help` | — | Print help |
+| `-h, --help` | — | Print help — `-h` for a summary, `--help` for the detail |
 | `-V, --version` | — | Print version |
 
 Either `-o` or `-u` is required, unless `--dry-run`.
