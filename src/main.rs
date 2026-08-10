@@ -11,7 +11,7 @@ mod upload;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -36,7 +36,9 @@ const MAX_LISTED_ADDRESSES: usize = 32;
 #[command(about = "Find which private keys and mnemonics control used Bitcoin addresses")]
 struct Args {
     /// Text file with one per line: a hex private key, or a BIP39 mnemonic
-    /// phrase of 12, 15, 18, 21 or 24 words.
+    /// phrase of 12, 15, 18, 21 or 24 words. Treated as a queue: it is emptied
+    /// once the results have reached everywhere they were asked to go, so the
+    /// next run starts on new material. `--dry-run` leaves it alone.
     input: PathBuf,
 
     /// Which indices of each mnemonic chain to scan first. A bare count is
@@ -263,7 +265,38 @@ fn run(args: &Args, ui: &Ui, loaded: &envfile::Loaded) -> Result<(), String> {
         // mutually exhaustive, so the only missing destination is the upload.
         ui.cont("not uploaded — pass -u to submit these to allkeys.directory");
     }
+
+    // Last, once every destination has taken its copy: reaching here means the
+    // output file is written and the upload, if one was asked for, came back
+    // accepted. Anything that failed above returned instead, leaving the input
+    // where it was so the run can be repeated.
+    clear_input(&args.input, &text, ui)?;
+
     println!();
+    Ok(())
+}
+
+/// Empty the input file now that everything it held has been scanned and the
+/// results are somewhere durable.
+///
+/// What is on disk is compared against the text this run read: an input that is
+/// appended to while a long scan runs would otherwise lose the lines added
+/// after the read, which were never scanned. A changed file is left alone
+/// rather than treated as an error — the scan itself succeeded, and there is
+/// nothing to retry.
+fn clear_input(path: &Path, scanned: &str, ui: &Ui) -> Result<(), String> {
+    let current = fs::read_to_string(path)
+        .map_err(|e| format!("could not re-read {}: {e}", path.display()))?;
+    if current != scanned {
+        ui.warn(&format!(
+            "{} changed during the scan; leaving it as it is",
+            path.display()
+        ));
+        return Ok(());
+    }
+
+    fs::write(path, "").map_err(|e| format!("could not empty {}: {e}", path.display()))?;
+    ui.row("cleared", &path.display().to_string());
     Ok(())
 }
 
@@ -363,7 +396,7 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
                 ui.cont(&format!(
                     "{} {}",
                     ui.dim(&format!("{:<width$}", derived.label())),
-                    ui.cyan(&derived.address)
+                    ui.address(&derived.address)
                 ));
             }
             continue;
@@ -393,7 +426,7 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
                 ui.detail(&format!(
                     "{} {}",
                     ui.dim(&format!("{:<sample_width$}", derived.label())),
-                    ui.cyan(&derived.address)
+                    ui.address(&derived.address)
                 ));
             }
         }
@@ -913,8 +946,8 @@ fn show_funded(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>, ui: &
             ui.detail(&format!(
                 "{} {}  {}",
                 ui.dim(&format!("{label:<width$}")),
-                ui.cyan(address),
-                ui.green(&format!("{} BTC", ui::btc(sats)))
+                ui.address(address),
+                ui.gold(&format!("{} BTC", ui::btc(sats)))
             ));
         }
     }

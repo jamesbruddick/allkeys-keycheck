@@ -25,6 +25,14 @@ Input is one per line, either kind:
 - **A BIP39 mnemonic** of 12, 15, 18, 21 or 24 words, which is expanded into
   thousands of addresses — see [Mnemonics](#mnemonics) below.
 
+**The input file is a queue, and a successful run empties it.** It is cleared
+only once every destination it was given has taken its copy — the output file
+merged, the upload accepted, or both — so what has been scanned leaves the file
+and the next run starts on new material. Nothing is cleared if any step failed,
+and `--dry-run` never clears. If the file changed while the scan was running —
+lines appended that this run never read — it is left alone and the run says so.
+Keep anything you want to scan twice somewhere other than the input file.
+
 Blank lines and `#` comments are ignored. A line with more than one word is
 read as a mnemonic, so a phrase with a word missing is reported as such rather
 than as a bad key. Lines that are neither a valid key nor a valid phrase are
@@ -87,6 +95,9 @@ overwritten — that failure mode is the one this design exists to prevent.
 | `--dry-run` | — | Print derived addresses, contact no network |
 | `--no-color` | — | Disable colored output |
 
+The palette is allkeys.directory's — bitcoin orange for the run's headlines,
+gold for balances, a lighter orange for addresses — in 24-bit color where
+`$COLORTERM` advertises it and the nearest 256-color approximations elsewhere.
 Color and the progress bar switch off automatically when output is redirected,
 and `NO_COLOR` / `TERM=dumb` are both respected, so piping to a log file gives
 plain readable text with no escape codes.

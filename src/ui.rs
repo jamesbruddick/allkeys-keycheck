@@ -15,18 +15,45 @@ const VALUE_COL: usize = 2 + GUTTER + 2;
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const CYAN: &str = "\x1b[36m";
 
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
+
+/// One colour of the palette, in both the depths a terminal might offer.
+///
+/// The exact hex is what allkeys.directory paints with; the index is the
+/// nearest xterm-256 slot, for a terminal that never advertised truecolor.
+/// Naming both here keeps the approximation next to the colour it stands in
+/// for, rather than in a conversion that would have to guess at intent.
+struct Color {
+    rgb: (u8, u8, u8),
+    index: u8,
+}
+
+impl Color {
+    const fn new(rgb: (u8, u8, u8), index: u8) -> Self {
+        Self { rgb, index }
+    }
+}
+
+/// The palette is the site's, so the tool and the directory it uploads to read
+/// as one product. Bitcoin orange is the brand and carries the run's headlines;
+/// gold is money, the same colour the site's balances use; the lighter orange
+/// is for addresses, which are everywhere and would shout in full brand.
+const BRAND: Color = Color::new((0xf7, 0x93, 0x1a), 208);
+const BRAND_SOFT: Color = Color::new((0xfd, 0xba, 0x74), 216);
+const GOLD: Color = Color::new((0xfa, 0xcc, 0x15), 220);
+const AMBER: Color = Color::new((0xfb, 0xbf, 0x24), 214);
+const RED: Color = Color::new((0xf8, 0x71, 0x71), 210);
 
 pub struct Ui {
     color: bool,
     /// Progress is only drawn in place when stderr is a real terminal.
     interactive: bool,
+    /// Whether the terminal said it can take 24-bit colour. The palette is a
+    /// set of specific oranges that the 256-colour cube only approximates, so
+    /// it is worth asking rather than always settling for the nearest slot.
+    truecolor: bool,
 }
 
 impl Ui {
@@ -37,6 +64,8 @@ impl Ui {
         let ui = Self {
             color: allowed && std::io::stdout().is_terminal(),
             interactive: allowed && std::io::stderr().is_terminal(),
+            truecolor: std::env::var("COLORTERM")
+                .is_ok_and(|v| v.contains("truecolor") || v.contains("24bit")),
         };
         // The cursor spends the run parked at the end of a progress bar that is
         // being redrawn under it, which reads as flicker. Hidden for the length
@@ -48,12 +77,26 @@ impl Ui {
         ui
     }
 
+    /// The escape that selects a palette colour at the depth this terminal has.
+    fn sgr(&self, color: &Color) -> String {
+        let (r, g, b) = color.rgb;
+        if self.truecolor {
+            format!("\x1b[38;2;{r};{g};{b}m")
+        } else {
+            format!("\x1b[38;5;{}m", color.index)
+        }
+    }
+
     fn paint(&self, code: &str, text: &str) -> String {
         if self.color {
             format!("{code}{text}{RESET}")
         } else {
             text.to_string()
         }
+    }
+
+    fn tint(&self, color: &Color, text: &str) -> String {
+        self.paint(&self.sgr(color), text)
     }
 
     pub fn bold(&self, text: &str) -> String {
@@ -64,18 +107,25 @@ impl Ui {
         self.paint(DIM, text)
     }
 
-    pub fn green(&self, text: &str) -> String {
-        self.paint(GREEN, text)
+    /// The run's headlines: what was found, what was sent.
+    pub fn brand(&self, text: &str) -> String {
+        self.tint(&BRAND, text)
     }
 
-    pub fn cyan(&self, text: &str) -> String {
-        self.paint(CYAN, text)
+    /// Money, in the same gold the site's balances use.
+    pub fn gold(&self, text: &str) -> String {
+        self.tint(&GOLD, text)
+    }
+
+    /// Addresses and other long strings the eye has to pick out of a table.
+    pub fn address(&self, text: &str) -> String {
+        self.tint(&BRAND_SOFT, text)
     }
 
     /// Product line at the top of a run.
     pub fn title(&self, version: &str) {
         let name = if self.color {
-            format!("{BOLD}{CYAN}allkeys-keycheck{RESET}")
+            format!("{BOLD}{}allkeys-keycheck{RESET}", self.sgr(&BRAND))
         } else {
             "allkeys-keycheck".to_string()
         };
@@ -93,7 +143,7 @@ impl Ui {
     /// A row whose value is the good news of the run.
     pub fn row_good(&self, label: &str, value: &str) {
         let padded = format!("{label:>GUTTER$}");
-        println!("  {}  {}", self.dim(&padded), self.green(value));
+        println!("  {}  {}", self.dim(&padded), self.brand(value));
     }
 
     /// A further line belonging to the row above, aligned under its value.
@@ -118,7 +168,7 @@ impl Ui {
         // The clear goes before the margin: `\r` returns to column 0 and would
         // otherwise erase the two leading spaces.
         let (clear, label) = if self.interactive {
-            ("\r\x1b[K", format!("{YELLOW}{padded}{RESET}"))
+            ("\r\x1b[K", format!("{}{padded}{RESET}", self.sgr(&AMBER)))
         } else {
             ("", padded)
         };
@@ -128,7 +178,7 @@ impl Ui {
     pub fn error(&self, text: &str) {
         let padded = format!("{:>GUTTER$}", "error");
         let label = if self.interactive {
-            format!("{BOLD}{RED}{padded}{RESET}")
+            format!("{BOLD}{}{padded}{RESET}", self.sgr(&RED))
         } else {
             padded
         };
@@ -147,8 +197,12 @@ impl Ui {
         } else {
             done * WIDTH / total
         };
+        // The track is dim rather than brand: only the filled part is the
+        // figure worth reading, and colouring both makes the bar look full at a
+        // glance whatever it says.
         let bar = format!(
-            "{}{}",
+            "{}{}{RESET}{DIM}{}{RESET}",
+            self.sgr(&BRAND),
             "█".repeat(filled),
             "░".repeat(WIDTH.saturating_sub(filled))
         );
@@ -158,7 +212,7 @@ impl Ui {
         // than allowed to shift the line.
         let fitted: String = label.chars().take(GUTTER).collect();
         let gutter = format!("{fitted:>GUTTER$}");
-        eprint!("\r  {DIM}{gutter}{RESET}  {CYAN}{bar}{RESET} {DIM}{done}/{total}{RESET}\x1b[K");
+        eprint!("\r  {DIM}{gutter}{RESET}  {bar} {DIM}{done}/{total}{RESET}\x1b[K");
         let _ = std::io::stderr().flush();
     }
 
