@@ -1,7 +1,5 @@
 /target
 *.txt
-!README*
-*.csv
 
 # Holds API keys
 .env

@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bip39 = "2.2.2"
 bitcoin = "0.32"
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
+# The branches of a mnemonic's tree are derived in parallel.
+rayon = "1"
 # 0.13 made `form` opt-in; the balance endpoint is POSTed as form-encoded.
 reqwest = { version = "0.13", features = ["blocking", "json", "form"] }
 serde = { version = "1", features = ["derive"] }

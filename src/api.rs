@@ -175,7 +175,10 @@ impl<'a> Client<'a> {
             .text()
             .map_err(|e| format!("could not read response ({e})"))?;
         if !status.is_success() {
-            return Err(format!("HTTP {status}: {}", body.trim().chars().take(120).collect::<String>()));
+            return Err(format!(
+                "HTTP {status}: {}",
+                body.trim().chars().take(120).collect::<String>()
+            ));
         }
 
         serde_json::from_str(&body).map_err(|e| {

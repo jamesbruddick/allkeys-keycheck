@@ -20,6 +20,9 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 
+const HIDE_CURSOR: &str = "\x1b[?25l";
+const SHOW_CURSOR: &str = "\x1b[?25h";
+
 pub struct Ui {
     color: bool,
     /// Progress is only drawn in place when stderr is a real terminal.
@@ -31,10 +34,18 @@ impl Ui {
         let allowed = !no_color
             && std::env::var_os("NO_COLOR").is_none()
             && std::env::var("TERM").map_or(true, |t| t != "dumb");
-        Self {
+        let ui = Self {
             color: allowed && std::io::stdout().is_terminal(),
             interactive: allowed && std::io::stderr().is_terminal(),
+        };
+        // The cursor spends the run parked at the end of a progress bar that is
+        // being redrawn under it, which reads as flicker. Hidden for the length
+        // of the run and restored by `Drop`.
+        if ui.interactive {
+            eprint!("{HIDE_CURSOR}");
+            let _ = std::io::stderr().flush();
         }
+        ui
     }
 
     fn paint(&self, code: &str, text: &str) -> String {
@@ -131,18 +142,23 @@ impl Ui {
             return;
         }
         const WIDTH: usize = 24;
-        let filled = if total == 0 { WIDTH } else { done * WIDTH / total };
+        let filled = if total == 0 {
+            WIDTH
+        } else {
+            done * WIDTH / total
+        };
         let bar = format!(
             "{}{}",
             "█".repeat(filled),
             "░".repeat(WIDTH.saturating_sub(filled))
         );
         // Drawn in the gutter layout too, so the bar sits where the row it
-        // will be replaced by is going to appear.
-        let gutter = format!("{label:>GUTTER$}");
-        eprint!(
-            "\r  {DIM}{gutter}{RESET}  {CYAN}{bar}{RESET} {DIM}{done}/{total}{RESET}\x1b[K"
-        );
+        // will be replaced by is going to appear. A label wider than the gutter
+        // would push the bar out of that column, so it is cut to fit rather
+        // than allowed to shift the line.
+        let fitted: String = label.chars().take(GUTTER).collect();
+        let gutter = format!("{fitted:>GUTTER$}");
+        eprint!("\r  {DIM}{gutter}{RESET}  {CYAN}{bar}{RESET} {DIM}{done}/{total}{RESET}\x1b[K");
         let _ = std::io::stderr().flush();
     }
 
@@ -150,6 +166,19 @@ impl Ui {
     pub fn clear(&self) {
         if self.interactive {
             eprint!("\r\x1b[K");
+            let _ = std::io::stderr().flush();
+        }
+    }
+}
+
+/// Give the cursor back, on every way out of the program that runs destructors
+/// — a clean finish, an early error return, or a panic that unwinds. A terminal
+/// left without a cursor is a broken terminal, so this is not left to the
+/// success path to do.
+impl Drop for Ui {
+    fn drop(&mut self) {
+        if self.interactive {
+            eprint!("{SHOW_CURSOR}");
             let _ = std::io::stderr().flush();
         }
     }
