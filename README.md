@@ -32,7 +32,8 @@ Download the zip for your system from the
 | `allkeys-keycheck-windows-amd64.zip` | Windows |
 
 Inside is the binary, `allkeys-keycheck`, ready to run — no `chmod` needed —
-along with this README, the licence, and `.env.example`.
+along with this README, the licence, and `allkeys-keycheck.toml`: the config
+set to the defaults, ready to edit. See [Configuration](#configuration).
 
 ```sh
 unzip allkeys-keycheck-macos-arm64.zip
@@ -69,7 +70,7 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.2.1
+  allkeys-keycheck 0.3.0
 
       scanning  keys.txt
           keys  1 unique · 1 duplicate collapsed · 1 line skipped
@@ -91,6 +92,9 @@ Two things to know before your first real run:
 - **The input file is a queue, and a successful run empties it.** See
   [Input](#input) below.
 
+Both of those paths can live in a config file instead, so a folder you scan
+regularly needs no arguments at all. See [Configuration](#configuration).
+
 Start with `--dry-run` to check how your file parses without making a single
 network request:
 
@@ -99,7 +103,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.2.1
+  allkeys-keycheck 0.3.0
 
       scanning  keys.txt
          input  2 unique · 1 phrase
@@ -287,8 +291,9 @@ answer — a wallet that has been used has addresses running on past wherever th
 scan happened to stop. So a count range is a starting point, not a limit:
 
 1. Every phrase is scanned at the count — ten indices from each end by default.
-2. Any phrase with a hit is followed further, four hundred indices at a time:
-   `10..400`, then `400..800`, then `800..1200`, and so on.
+2. Any phrase with a hit is followed further, `--expand` indices at a time —
+   four hundred by default: `10..400`, then `400..800`, then `800..1200`, and
+   so on.
 3. An end stops as soon as one of its rounds comes back with nothing.
 
 **The two ends stop independently.** Activity clusters at one end of a chain, so
@@ -303,6 +308,13 @@ requests whether one phrase is still growing or forty are:
       expanded  3 phrases · 4 rounds · 19,200 addresses · 13 requests · 6.2s
 ```
 
+Each round reaches out to the next multiple of `--expand`, which defaults to
+400. Raising it reaches further per request on a phrase you expect to be busy;
+lowering it stops sooner once the activity ends. `--no-expand` turns the whole
+thing off, so a count is scanned as exactly the indices it names — a fixed-cost
+pass over a large wordlist, where a single phrase that hits would otherwise
+keep the run going. The two cannot be passed together.
+
 Expansion applies to the **count form only**. Explicit windows are scanned
 exactly as written and never grow, which is what makes `-r 400000..500000` safe
 as one shard of a larger scan — a shard cannot wander into its neighbour's
@@ -315,8 +327,9 @@ nothing to expand on.
 same phrase into an entirely different wallet, so it also decides which phrases
 count as duplicates of each other.
 
-Prefer `BIP39_PASSPHRASE` in the environment or a `.env` file — a passphrase
-passed on the command line lands in your shell history and in the process list.
+Prefer `passphrase` under `[secrets]` in the config file, or
+`BIP39_PASSPHRASE` in the environment — a passphrase passed on the command line
+lands in your shell history and in the process list.
 
 When a mnemonic hits, the key written and uploaded is the **child key at that
 path**, not the phrase. The child is what spends the coins. The terminal output
@@ -354,49 +367,84 @@ untouched, so the run can be repeated.
 
 ## Configuration
 
-API keys can come from a `.env` file, so you don't have to export anything.
-Copy `.env.example` to `.env` and fill it in:
+Every option below can be set in `allkeys-keycheck.toml`, so a scan you repeat
+is one file and a bare `allkeys-keycheck` rather than a line of flags to
+remember. A release ships with the file already in place; from a source build,
+write one with:
 
 ```sh
-cp .env.example .env
-chmod 600 .env   # restrict it to your user — the file holds your API keys
+./allkeys-keycheck --init-config
 ```
 
-```ini
-ALLKEYS_API_KEY=ak_...
-BLOCKCHAIN_API_KEY=
-BIP39_PASSPHRASE=
+Either way it arrives ready to run — an input file, somewhere for the results
+to go, and every other setting at its default — so you change only what you
+want changed:
+
+```toml
+input  = "input.txt"
+output = "output.txt"
+range  = "10"
+upload = false
+
+[secrets]
+# allkeys-api-key = "ak_..."
 ```
 
-The file is searched for in the current directory and its parents, so it works
-from anywhere in a project. `--env-file <FILE>` points at a specific file
-instead; naming one that doesn't exist is an error, while simply having no
-`.env` is not.
+Copy it, put your keys in `input.txt`, and the whole invocation is:
 
-Precedence is **command-line flag → environment variable → `.env`**, so a stale
-file never overrides a variable you set deliberately. `.env` is gitignored, and
-each run warns — naming the file — if it is readable by other users.
+```sh
+./allkeys-keycheck
+```
+
+`[secrets]` ships commented out on purpose: an empty API key would be sent and
+rejected, where a missing one fails before the scan starts.
+
+The file is looked for in the current directory, so a scan lives in its own
+folder alongside its input and its results. `--config <FILE>` points at a
+specific one instead; naming a file that doesn't exist is an error, while
+simply having no config file is not.
+
+`--init-config` creates the file `0600`, readable only by you, and each run
+warns — naming the file — if it holds an API key and other users can read it.
+
+Keys are the long flag names without the leading dashes: `dry-run`, `no-color`,
+`batch`. A key that isn't one of them is an error rather than being ignored, so
+a typo can't quietly cost you a passphrase. `range` is written as a string,
+because `10..110` is not a TOML number.
+
+`[secrets]` holds the three values worth keeping off the command line, where
+they would land in your shell history and in the process list.
+
+Precedence is **command-line flag → environment variable → config file**, so a
+stale line in the file never overrides a flag typed on the spot. A flag can
+only turn something on: `upload = false` in the file does not undo a `-u`.
+`ALLKEYS_API_KEY`, `BLOCKCHAIN_API_KEY` and `BIP39_PASSPHRASE` still work as
+environment variables for anyone who prefers them.
 
 ## Options
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `<FILE>` | — | Text file of keys and phrases, one per line |
-| `-o, --output <FILE>` | — | Merge active keys into a file |
+| `<FILE>` | `input` in config | Text file of keys and phrases, one per line |
+| `-o, --output <FILE>` | `output` in config | Merge active keys into a file |
 | `-u, --upload` | — | Submit found keys to allkeys.directory |
 | `-r, --range <RANGE>` | `10` | Which indices of each chain to scan — a count, or windows |
-| `--passphrase <WORD>` | `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
+| `--expand <N>` | `400` | How far each expansion round reaches |
+| `--no-expand` | — | Scan the count exactly, never following it further |
+| `--passphrase <WORD>` | config / `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
 | `--batch <N>` | `1500` | Max addresses per API request |
 | `--delay <MS>` | `0` | Pause between successful API requests |
-| `--blockchain-api-key <KEY>` | `$BLOCKCHAIN_API_KEY` | blockchain.info key, raises the rate limit |
-| `--allkeys-api-key <KEY>` | `$ALLKEYS_API_KEY` | allkeys.directory key, required by `--upload` |
-| `--env-file <FILE>` | `.env` | Read variables from a specific file |
+| `--blockchain-api-key <KEY>` | config / `$BLOCKCHAIN_API_KEY` | blockchain.info key, raises the rate limit |
+| `--allkeys-api-key <KEY>` | config / `$ALLKEYS_API_KEY` | allkeys.directory key, required by `--upload` |
+| `--config <FILE>` | `allkeys-keycheck.toml` | Read settings from a specific file |
+| `--init-config` | — | Write a commented `allkeys-keycheck.toml` and exit |
 | `--dry-run` | — | Print derived addresses, contact no network |
 | `--no-color` | — | Disable coloured output |
 | `-h, --help` | — | Print help — `-h` for a summary, `--help` for the detail |
 | `-V, --version` | — | Print version |
 
-Either `-o` or `-u` is required, unless `--dry-run`.
+Either `-o` or `-u` is required, unless `--dry-run`. Both `<FILE>` and `-o` can
+come from the config file instead of the command line.
 
 Colour and the progress bar switch off automatically when output is redirected,
 and `NO_COLOR` and `TERM=dumb` are both respected, so piping to a log file gives
@@ -440,7 +488,8 @@ address, rather than writing an output file that quietly omits it.
 - **The output file is created `0600`** — readable only by you — because a
   world-readable list of spendable keys is a much worse outcome than a failed
   write.
-- **`.env` is gitignored**, and a run warns if it is readable by other users.
+- **`allkeys-keycheck.toml` is gitignored**, `--init-config` creates it `0600`,
+  and a run warns if it holds an API key and other users can read it.
 - **Pass secrets through the environment, not the command line.** Anything on
   the command line is visible in your shell history and to other processes.
 

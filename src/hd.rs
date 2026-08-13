@@ -155,10 +155,10 @@ pub enum End {
     Far,
 }
 
-/// How far each round of an expanding scan reaches: out to the next multiple of
-/// this. A scan that started at 10 therefore grows to 400 and then to 800,
-/// rather than to 410 and 810 — round numbers are what someone reading the
-/// output has to reason about.
+/// How far each round of an expanding scan reaches by default: out to the next
+/// multiple of this. A scan that started at 10 therefore grows to 400 and then
+/// to 800, rather than to 410 and 810 — round numbers are what someone reading
+/// the output has to reason about. `--expand` overrides it.
 pub const EXPANSION_STEP: u32 = 400;
 
 /// The next window out from one end, given how far both ends have already been
@@ -166,12 +166,15 @@ pub const EXPANSION_STEP: u32 = 400;
 /// exhausted or the other end has already covered what is left.
 ///
 /// `scanned` and `opposite` are counts inwards from their own ends, so the two
-/// meet when they sum to the size of the index space.
-pub fn next_window(end: End, scanned: u32, opposite: u32) -> Option<Range<u32>> {
+/// meet when they sum to the size of the index space. `step` is how far a round
+/// reaches, and must be at least 1: a round of nothing would never terminate.
+pub fn next_window(end: End, scanned: u32, opposite: u32, step: u32) -> Option<Range<u32>> {
+    debug_assert!(step > 0, "a step of zero would scan nothing, forever");
+
     // The far side of the round, clamped so the two ends cannot cross and
     // derive the same index twice.
-    let target = (scanned / EXPANSION_STEP + 1)
-        .saturating_mul(EXPANSION_STEP)
+    let target = (scanned / step + 1)
+        .saturating_mul(step)
         .min(HARDENED.saturating_sub(opposite));
     if target <= scanned {
         return None;
@@ -703,38 +706,57 @@ mod tests {
         assert_eq!(Span::of(vec![0..10]).count(), None);
     }
 
+    /// The step every round test uses unless it is testing the step itself.
+    const STEP: u32 = EXPANSION_STEP;
+
     #[test]
     fn rounds_reach_out_to_the_next_step() {
         use End::{Far, Near};
         // The default start of 10 grows to 400, then by four hundreds.
-        assert_eq!(next_window(Near, 10, 10), Some(10..400));
-        assert_eq!(next_window(Near, 400, 10), Some(400..800));
-        assert_eq!(next_window(Near, 950, 10), Some(950..1200));
+        assert_eq!(next_window(Near, 10, 10, STEP), Some(10..400));
+        assert_eq!(next_window(Near, 400, 10, STEP), Some(400..800));
+        assert_eq!(next_window(Near, 950, 10, STEP), Some(950..1200));
         // The far end mirrors it, counting down from the top.
         assert_eq!(
-            next_window(Far, 10, 10),
+            next_window(Far, 10, 10, STEP),
             Some(HARDENED - 400..HARDENED - 10)
         );
         assert_eq!(
-            next_window(Far, 400, 10),
+            next_window(Far, 400, 10, STEP),
             Some(HARDENED - 800..HARDENED - 400)
         );
+    }
+
+    /// The step is what `--expand` sets, so a round has to follow it rather
+    /// than the default: reaching out to the next multiple of whatever it is.
+    #[test]
+    fn a_custom_step_sets_how_far_a_round_reaches() {
+        use End::{Far, Near};
+        assert_eq!(next_window(Near, 10, 10, 50), Some(10..50));
+        assert_eq!(next_window(Near, 50, 10, 50), Some(50..100));
+        assert_eq!(next_window(Near, 10, 10, 5000), Some(10..5000));
+        assert_eq!(
+            next_window(Far, 50, 10, 50),
+            Some(HARDENED - 100..HARDENED - 50)
+        );
+        // A step of one still makes progress, one index at a time.
+        assert_eq!(next_window(Near, 10, 10, 1), Some(10..11));
     }
 
     #[test]
     fn rounds_stop_at_the_far_side_and_at_each_other() {
         use End::{Far, Near};
         // Nothing left: the whole space is already covered by the two ends.
-        assert_eq!(next_window(Near, HARDENED, 0), None);
-        assert_eq!(next_window(Far, HARDENED, 0), None);
+        assert_eq!(next_window(Near, HARDENED, 0, STEP), None);
+        assert_eq!(next_window(Far, HARDENED, 0, STEP), None);
         // The ends meet in the middle rather than crossing and re-deriving:
         // the last near round is clipped to where the far end has reached.
         let far = HARDENED - 150;
-        assert_eq!(next_window(Near, 100, far), Some(100..150));
-        assert_eq!(next_window(Near, 150, far), None);
+        assert_eq!(next_window(Near, 100, far, STEP), Some(100..150));
+        assert_eq!(next_window(Near, 150, far, STEP), None);
         // And the clip applies mid-step too, well short of the next multiple.
         let far = HARDENED - 600;
-        assert_eq!(next_window(Near, 400, far), Some(400..600));
+        assert_eq!(next_window(Near, 400, far, STEP), Some(400..600));
     }
 
     /// The branches and the indices within them are derived in parallel, so the

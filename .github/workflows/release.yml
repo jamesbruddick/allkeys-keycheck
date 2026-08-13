@@ -119,10 +119,12 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/$BIN" "dist/$name/"
           fi
-          # .env.example travels with it: --upload needs API keys, and the
-          # names of those variables should not require a trip back to the
-          # repository to find.
-          cp README.md LICENSE .env.example "dist/$name/"
+          # The config travels with it, under the name the binary looks for,
+          # so an unpacked release is a working setup rather than a file to
+          # rename first. It ships as the defaults with every secret commented
+          # out, so it changes nothing until it is edited.
+          cp README.md LICENSE "dist/$name/"
+          cp allkeys-keycheck.toml.example "dist/$name/allkeys-keycheck.toml"
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$name.zip" "$name" >/dev/null
@@ -187,8 +189,10 @@ jobs:
             ./allkeys-keycheck --version
             ```
 
-            The README and `.env.example` are in the zip alongside it; copy that
-            to `.env` to set your API keys.
+            `allkeys-keycheck.toml` is in the zip alongside it, ready to edit:
+            it sets the defaults and is where your API keys go. Put your keys
+            and phrases in `input.txt` next to it and run the binary with no
+            arguments.
 
             Every file is signed with build provenance, so you can confirm it
             was built by this workflow from this source:

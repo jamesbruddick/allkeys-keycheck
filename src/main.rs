@@ -2,7 +2,7 @@
 //! and report which of them control an address that has been used on-chain.
 
 mod api;
-mod envfile;
+mod config;
 mod hd;
 mod http;
 mod keys;
@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use bitcoin::key::Secp256k1;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use rayon::prelude::*;
 
 use keys::{Derived, KeyEntry};
@@ -41,6 +41,10 @@ Examples:
   allkeys-keycheck keys.txt -o found.txt   scan, save what has activity
   allkeys-keycheck keys.txt -u             scan, submit to allkeys.directory
   allkeys-keycheck keys.txt --dry-run      derive addresses, contact no network
+  allkeys-keycheck --init-config           write a commented allkeys-keycheck.toml
+
+Every option here can be set in allkeys-keycheck.toml instead, so a configured
+folder scans with a bare `allkeys-keycheck`. Flags win over the file.
 
 Results need somewhere to go: pass -o, -u, or both, unless --dry-run.";
 
@@ -75,8 +79,10 @@ struct Args {
     /// The file is a queue: a successful run empties it, so the next run starts
     /// on new material. Keep anything you want to scan twice elsewhere.
     /// `--dry-run` leaves it alone.
+    ///
+    /// Optional here if `input` is set in allkeys-keycheck.toml.
     #[arg(value_name = "FILE")]
-    input: PathBuf,
+    input: Option<PathBuf>,
 
     /// Which indices of each mnemonic chain to scan: a count, or windows
     /// like 10..110
@@ -100,8 +106,9 @@ struct Args {
     /// BIP39 passphrase, the optional 25th word
     ///
     /// A different passphrase turns the same phrase into an entirely different
-    /// wallet. Prefer the environment variable or a .env file: a passphrase on
-    /// the command line lands in your shell history and in the process list.
+    /// wallet. Prefer [secrets] in the config file, or the environment
+    /// variable: a passphrase on the command line lands in your shell history
+    /// and in the process list.
     #[arg(
         long,
         env = "BIP39_PASSPHRASE",
@@ -117,9 +124,35 @@ struct Args {
     /// phrase itself. An existing file is merged into, never replaced, so runs
     /// accumulate and a repeat cannot lose what an earlier one found.
     ///
-    /// Omit it to write nothing to disk — useful alongside --upload.
+    /// Omit it to write nothing to disk — useful alongside --upload. It can be
+    /// set in allkeys-keycheck.toml instead.
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
+
+    /// How far each expansion round reaches, in indices
+    ///
+    /// A phrase that turns something up is followed past the count it was
+    /// scanned at, out to the next multiple of this each round, until a round
+    /// comes back empty. Raise it to reach further per request on a phrase you
+    /// expect to be busy; lower it to stop sooner after the activity ends.
+    ///
+    /// Applies to a count --range only. Explicit windows never expand.
+    #[arg(
+        long,
+        default_value_t = hd::EXPANSION_STEP,
+        value_parser = clap::value_parser!(u32).range(1..),
+        value_name = "N",
+        conflicts_with = "no_expand"
+    )]
+    expand: u32,
+
+    /// Scan the --range count exactly, without following it further
+    ///
+    /// Turns expansion off, so a count behaves like the windows it names and
+    /// nothing more. Useful for a fixed-cost pass over a large wordlist, where
+    /// a phrase that hits would otherwise keep the run going.
+    #[arg(long)]
+    no_expand: bool,
 
     /// Maximum addresses per API request
     ///
@@ -160,12 +193,21 @@ struct Args {
     )]
     allkeys_api_key: Option<String>,
 
-    /// Read variables from this file instead of searching for a .env
+    /// Read settings from this file instead of ./allkeys-keycheck.toml
     ///
-    /// Values are read before the arguments above resolve, so a flag on the
-    /// command line still wins over the file.
+    /// The file is the weakest layer: anything given on the command line, or
+    /// in the environment, wins over it. Naming a file that does not exist is
+    /// an error; simply having no config file is not.
     #[arg(long, value_name = "FILE")]
-    env_file: Option<PathBuf>,
+    config: Option<PathBuf>,
+
+    /// Write a commented allkeys-keycheck.toml and exit
+    ///
+    /// Every setting, explained and commented out. Created readable only by
+    /// you, since it is where your API keys go. An existing file is never
+    /// overwritten.
+    #[arg(long)]
+    init_config: bool,
 
     /// Derive and print addresses without contacting the network
     #[arg(long)]
@@ -177,18 +219,42 @@ struct Args {
 }
 
 fn main() -> ExitCode {
-    // Before parsing, not after: clap resolves the `env = "..."` fallbacks
-    // while it parses, so anything loaded afterwards would arrive too late.
-    let loaded = envfile::load();
-    let args = Args::parse();
+    // Parsed through the matches rather than `Args::parse()`, because merging
+    // the config file underneath needs to know which values the user actually
+    // supplied and which are clap's own defaults. See `merge_config`.
+    let matches = Args::command().get_matches();
+    let mut args = match Args::from_arg_matches(&matches) {
+        Ok(args) => args,
+        Err(e) => e.exit(),
+    };
+
+    // Before the UI, so a broken config cannot be masked by a colour setting
+    // read out of that same file.
+    let path = match load_config(&mut args, &matches) {
+        Ok(path) => path,
+        Err(e) => {
+            Ui::new(args.no_color).error(&e);
+            return ExitCode::FAILURE;
+        }
+    };
+
     let ui = Ui::new(args.no_color);
 
-    if let envfile::Loaded::Failed(path, e) = &loaded {
-        ui.error(&format!("could not read {}: {e}", path.display()));
-        return ExitCode::FAILURE;
+    if args.init_config {
+        return match config::write_template(Path::new(config::DEFAULT_FILE)) {
+            Ok(()) => {
+                ui.row("written", config::DEFAULT_FILE);
+                ui.cont("uncomment what you need — every setting is explained in it");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                ui.error(&e);
+                ExitCode::FAILURE
+            }
+        };
     }
 
-    match run(&args, &ui, &loaded) {
+    match run(&args, &ui, path.as_ref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             ui.clear();
@@ -198,17 +264,117 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: &Args, ui: &Ui, loaded: &envfile::Loaded) -> Result<(), String> {
+/// Read the config file and fill in everything the command line and the
+/// environment left at its default. Returns the file's path, if there was one.
+fn load_config(
+    args: &mut Args,
+    matches: &clap::ArgMatches,
+) -> Result<Option<(PathBuf, bool)>, String> {
+    // --init-config writes the file; reading one first would only turn a
+    // typo in an existing config into a failure to create a new one.
+    if args.init_config {
+        return Ok(None);
+    }
+
+    let loaded = config::load(args.config.as_deref())?;
+    let found = loaded.path.map(|path| (path, loaded.exposed));
+    merge_config(args, matches, loaded.config)?;
+    Ok(found)
+}
+
+/// True when the user supplied nothing for this argument — no flag, no
+/// environment variable — which is exactly when the config file gets a say.
+/// What is left is clap's own default, or nothing at all for an optional one.
+fn unset(matches: &clap::ArgMatches, id: &str) -> bool {
+    use clap::parser::ValueSource::{CommandLine, EnvVariable};
+    !matches!(
+        matches.value_source(id),
+        Some(CommandLine) | Some(EnvVariable)
+    )
+}
+
+/// Layer the file under what was already given. Command line → environment →
+/// file → default, weakest last, so a stale line in the file can never
+/// override a flag typed on the spot.
+fn merge_config(
+    args: &mut Args,
+    matches: &clap::ArgMatches,
+    config: config::Config,
+) -> Result<(), String> {
+    if unset(matches, "input") {
+        args.input = config.input;
+    }
+    if unset(matches, "output") {
+        args.output = config.output;
+    }
+    if unset(matches, "range") {
+        if let Some(range) = config.range {
+            args.range = range
+                .parse()
+                .map_err(|e| format!("range = \"{range}\" in the config file: {e}"))?;
+        }
+    }
+    if unset(matches, "expand") {
+        if let Some(expand) = config.expand {
+            if expand == 0 {
+                return Err("expand = 0 in the config file: a round of no indices \
+                            would scan nothing and never finish"
+                    .into());
+            }
+            args.expand = expand;
+        }
+    }
+    if unset(matches, "batch") {
+        if let Some(batch) = config.batch {
+            args.batch = batch;
+        }
+    }
+    if unset(matches, "delay") {
+        if let Some(delay) = config.delay {
+            args.delay = delay;
+        }
+    }
+    // A flag is either passed or not, so the file can only ever turn one on —
+    // `upload = false` in the file cannot undo a `-u` on the command line.
+    args.upload |= unset(matches, "upload") && config.upload.unwrap_or(false);
+    args.dry_run |= unset(matches, "dry_run") && config.dry_run.unwrap_or(false);
+    args.no_expand |= unset(matches, "no_expand") && config.no_expand.unwrap_or(false);
+    args.no_color |= unset(matches, "no_color") && config.no_color.unwrap_or(false);
+
+    if unset(matches, "passphrase") {
+        if let Some(passphrase) = config.secrets.passphrase {
+            args.passphrase = passphrase;
+        }
+    }
+    if unset(matches, "blockchain_api_key") {
+        args.blockchain_api_key = config.secrets.blockchain_api_key;
+    }
+    if unset(matches, "allkeys_api_key") {
+        args.allkeys_api_key = config.secrets.allkeys_api_key;
+    }
+
+    Ok(())
+}
+
+fn run(args: &Args, ui: &Ui, config_file: Option<&(PathBuf, bool)>) -> Result<(), String> {
     ui.title(env!("CARGO_PKG_VERSION"));
     ui.gap();
-    ui.row("scanning", &args.input.display().to_string());
+
+    let input = args.input.as_deref().ok_or_else(|| {
+        format!(
+            "no input file: name one on the command line, or set input = \"...\" in {}",
+            config::DEFAULT_FILE
+        )
+    })?;
+    ui.row("scanning", &input.display().to_string());
 
     // The path only, never a value — this output gets pasted into bug reports.
-    if let envfile::Loaded::File(path) = loaded {
+    if let Some((path, exposed)) = config_file {
         ui.row("config", &path.display().to_string());
-        if envfile::is_world_readable(path) {
+        if *exposed {
             ui.warn(&format!(
-                "{} is readable by other users; restrict it with chmod 600",
+                "{} holds an API key and is readable by other users; restrict it \
+                 with chmod 600",
                 path.display()
             ));
         }
@@ -218,11 +384,11 @@ fn run(args: &Args, ui: &Ui, loaded: &envfile::Loaded) -> Result<(), String> {
     // refused up front. --dry-run is exempt: it runs no scan, and already says
     // where its output goes.
     if !args.dry_run && args.output.is_none() && !args.upload {
-        return Err(
+        return Err(format!(
             "results need somewhere to go: pass -o <file> to save them, --upload to submit \
-             them, or both"
-                .into(),
-        );
+             them, or set output = \"...\" in {}",
+            config::DEFAULT_FILE
+        ));
     }
 
     // Checked before the scan rather than after it, so a missing token costs
@@ -230,17 +396,17 @@ fn run(args: &Args, ui: &Ui, loaded: &envfile::Loaded) -> Result<(), String> {
     let upload_token = match (args.upload, &args.allkeys_api_key) {
         (true, Some(key)) => Some(key.clone()),
         (true, None) => {
-            return Err(
+            return Err(format!(
                 "--upload needs an allkeys.directory API key: pass --allkeys-api-key, set \
-                 ALLKEYS_API_KEY, or put ALLKEYS_API_KEY=... in a .env file"
-                    .into(),
-            )
+                 ALLKEYS_API_KEY, or put allkeys-api-key = \"...\" under [secrets] in {}",
+                config::DEFAULT_FILE
+            ));
         }
         (false, _) => None,
     };
 
-    let text = fs::read_to_string(&args.input)
-        .map_err(|e| format!("could not read {}: {e}", args.input.display()))?;
+    let text = fs::read_to_string(input)
+        .map_err(|e| format!("could not read {}: {e}", input.display()))?;
 
     let parsed = parse_input(&text, &args.passphrase, ui)?;
     let count = parsed.inputs.len();
@@ -305,8 +471,9 @@ fn run(args: &Args, ui: &Ui, loaded: &envfile::Loaded) -> Result<(), String> {
     let mut hits = check(&client, &entries, args, ui)?;
 
     // A count span is a starting point, so the phrases that turned something up
-    // are followed further out. Explicit windows are taken as written.
-    if let Some(start) = args.range.count() {
+    // are followed further out. Explicit windows are taken as written, and
+    // --no-expand asks for a count to be taken that way too.
+    if let Some(start) = args.range.count().filter(|_| !args.no_expand) {
         expand(
             &client,
             &mut entries,
@@ -323,8 +490,9 @@ fn run(args: &Args, ui: &Ui, loaded: &envfile::Loaded) -> Result<(), String> {
     if let Some(token) = upload_token {
         upload_keys(&active, &token, ui)?;
     } else if !active.is_empty() {
-        // Reaching here means -o was given: the two are required to be
-        // mutually exhaustive, so the only missing destination is the upload.
+        // Reaching here means an output file was given: the two are required
+        // to be mutually exhaustive, so the only missing destination is the
+        // upload.
         ui.cont("not uploaded — pass -u to submit these to allkeys.directory");
     }
 
@@ -332,7 +500,7 @@ fn run(args: &Args, ui: &Ui, loaded: &envfile::Loaded) -> Result<(), String> {
     // output file is written and the upload, if one was asked for, came back
     // accepted. Anything that failed above returned instead, leaving the input
     // where it was so the run can be repeated.
-    clear_input(&args.input, &text, ui)?;
+    clear_input(input, &text, ui)?;
 
     println!();
     Ok(())
@@ -409,11 +577,7 @@ fn noun(entries: &[KeyEntry], count: usize) -> &'static str {
 }
 
 fn plural(count: usize) -> &'static str {
-    if count == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if count == 1 { "" } else { "s" }
 }
 
 /// Width of the label column for one block of rows: wide enough for its own
@@ -783,6 +947,8 @@ struct Growing {
     /// nothing but requests.
     near_open: bool,
     far_open: bool,
+    /// How far each round reaches, from `--expand`.
+    step: u32,
 }
 
 impl Growing {
@@ -790,12 +956,12 @@ impl Growing {
     fn next_windows(&self) -> Vec<(hd::End, std::ops::Range<u32>)> {
         let mut windows = Vec::new();
         if self.near_open {
-            if let Some(w) = hd::next_window(hd::End::Near, self.near, self.far) {
+            if let Some(w) = hd::next_window(hd::End::Near, self.near, self.far, self.step) {
                 windows.push((hd::End::Near, w));
             }
         }
         if self.far_open {
-            if let Some(w) = hd::next_window(hd::End::Far, self.far, self.near) {
+            if let Some(w) = hd::next_window(hd::End::Far, self.far, self.near, self.step) {
                 windows.push((hd::End::Far, w));
             }
         }
@@ -834,7 +1000,7 @@ fn expand(
     ui: &Ui,
 ) -> Result<(), String> {
     let batch = args.batch;
-    expand_with(entries, phrases, hits, start, ui, |addresses| {
+    expand_with(entries, phrases, hits, start, args.expand, ui, |addresses| {
         query(client, addresses, batch, "expanding", ui)
     })
 }
@@ -846,6 +1012,7 @@ fn expand_with(
     phrases: &HashMap<usize, hd::Phrase>,
     hits: &mut HashMap<String, api::Balance>,
     start: u32,
+    step: u32,
     ui: &Ui,
     mut look_up: impl FnMut(&[String]) -> Result<(HashMap<String, api::Balance>, usize), String>,
 ) -> Result<(), String> {
@@ -868,6 +1035,7 @@ fn expand_with(
                 far: start,
                 near_open: hit_at(hd::End::Near),
                 far_open: hit_at(hd::End::Far),
+                step,
             };
             phrase.is_growing().then_some(phrase)
         })
@@ -1162,9 +1330,35 @@ fn write_results(
 mod tests {
     use super::*;
 
-    const PHRASE: &str =
-        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon \
          abandon about";
+
+    /// The shipped template is meant to be copied and run as it stands, so a
+    /// bare command line against it has to produce a complete, valid run: an
+    /// input to read, somewhere for the results to go, and every other setting
+    /// still at the value the file says it is.
+    #[test]
+    fn the_template_is_a_complete_run_on_its_own() {
+        let matches = Args::command().get_matches_from(["allkeys-keycheck"]);
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        let template = toml::from_str(config::TEMPLATE).unwrap();
+        merge_config(&mut args, &matches, template).unwrap();
+
+        // The two the tool cannot run without: no input is an error, and so is
+        // having nowhere to put the results.
+        assert_eq!(args.input.as_deref(), Some(Path::new("input.txt")));
+        assert_eq!(args.output.as_deref(), Some(Path::new("output.txt")));
+
+        // The rest are the defaults written out, so copying the file changes
+        // nothing about how a scan behaves.
+        assert_eq!(args.range.count(), Some(10));
+        assert_eq!(args.batch, 1500);
+        assert_eq!(args.delay, 0);
+        assert_eq!(args.passphrase, "");
+        assert!(!args.upload);
+        assert!(!args.dry_run);
+        assert!(!args.no_color);
+    }
 
     fn used() -> api::Balance {
         api::Balance {
@@ -1193,6 +1387,11 @@ mod tests {
     /// and nothing at the far end has. Returns the indices that ended up
     /// derived on one branch, split into the two ends.
     fn expanded(start: u32, active_below: u32) -> (Vec<u32>, Vec<u32>) {
+        expanded_by(start, active_below, hd::EXPANSION_STEP)
+    }
+
+    /// The same, with the round size `--expand` would have set.
+    fn expanded_by(start: u32, active_below: u32, step: u32) -> (Vec<u32>, Vec<u32>) {
         let ui = Ui::new(true);
         let secp = Secp256k1::new();
         let phrase = hd::parse(PHRASE, "").expect("test vector phrase is valid");
@@ -1217,7 +1416,7 @@ mod tests {
             .map(|d| (d.address.clone(), used()))
             .collect();
 
-        expand_with(&mut entries, &phrases, &mut hits, start, &ui, |addresses| {
+        expand_with(&mut entries, &phrases, &mut hits, start, step, &ui, |addresses| {
             let found = addresses
                 .iter()
                 .filter(|a| used_addresses.contains_key(*a))
@@ -1304,5 +1503,54 @@ mod tests {
     fn a_phrase_with_no_activity_is_not_followed() {
         let (near, far) = expanded(10, 0);
         assert_eq!((near.len(), far.len()), (10, 10));
+    }
+
+    /// `--expand` decides how far each round reaches, and so how far past the
+    /// activity a scan goes before it stops. The same chain scanned in smaller
+    /// rounds stops sooner; in one large round it overshoots further.
+    #[test]
+    fn the_expand_step_sets_how_far_each_round_goes() {
+        // Used through index 99. In rounds of 50 that is 10..50 and 50..100,
+        // both hitting, then an empty 100..150 that ends it.
+        let (near, far) = expanded_by(10, 100, 50);
+        assert_eq!(near, (0..150).collect::<Vec<u32>>());
+        assert_eq!(far.len(), 10);
+
+        // The same activity in rounds of 200 clears it in one, and stops after
+        // the empty round that follows — twice as far for half the requests.
+        let (near, _) = expanded_by(10, 100, 200);
+        assert_eq!(near, (0..400).collect::<Vec<u32>>());
+    }
+
+    /// --no-expand takes a count as exactly the indices it names, so a phrase
+    /// that hits costs no more than one that does not — which is the point of
+    /// a fixed-cost pass over a wordlist.
+    #[test]
+    fn no_expand_leaves_a_count_where_it_started() {
+        let matches = Args::command().get_matches_from(["allkeys-keycheck", "--no-expand"]);
+        let args = Args::from_arg_matches(&matches).unwrap();
+        assert!(args.range.count().is_some());
+        assert!(args.range.count().filter(|_| !args.no_expand).is_none());
+    }
+
+    /// A step of zero would ask for rounds of no indices, which would either
+    /// spin forever or quietly scan nothing. Refused from either direction.
+    #[test]
+    fn a_step_of_zero_is_refused() {
+        assert!(Args::try_parse_from(["allkeys-keycheck", "--expand", "0"]).is_err());
+
+        let matches = Args::command().get_matches_from(["allkeys-keycheck"]);
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        let config = toml::from_str("expand = 0\n").unwrap();
+        assert!(merge_config(&mut args, &matches, config).is_err());
+    }
+
+    /// Asking to expand and not to expand in the same breath is a mistake
+    /// worth naming, rather than one of the two silently winning.
+    #[test]
+    fn expand_and_no_expand_together_are_refused() {
+        assert!(
+            Args::try_parse_from(["allkeys-keycheck", "--expand", "800", "--no-expand"]).is_err()
+        );
     }
 }

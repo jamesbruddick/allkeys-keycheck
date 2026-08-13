@@ -1,0 +1,58 @@
+# allkeys-keycheck configuration
+#
+# Runs as it stands: put your keys in input.txt, then run the tool with no
+# arguments. Every setting here has a matching command-line flag that overrides
+# it, so this file holds what stays the same between runs.
+#
+# Precedence, weakest last:  command line  →  environment  →  this file.
+
+
+# The file of secrets to scan, one hex private key or BIP39 phrase per line.
+# A successful run empties it — keep anything you want to scan twice elsewhere.
+input = "input.txt"
+
+# Where the secrets that turned out to have on-chain activity are saved. The
+# file is merged into, never replaced, so runs accumulate. A run needs this,
+# upload below, or both.
+output = "output.txt"
+
+# Submit found keys to allkeys.directory as well. This sends private keys off
+# this machine and cannot be undone. Needs allkeys-api-key at the bottom.
+upload = false
+
+# Which indices of each mnemonic chain to scan. A count means that many at each
+# end of the chain; windows are absolute, like "10..110" or "400000..500000".
+# Always quoted — 10..110 is not a TOML number.
+range = "10"
+
+# How far each round follows a phrase that turned something up, in indices.
+expand = 400
+
+# Scan the range count exactly, following nothing further.
+# no-expand = true
+
+# Maximum addresses per API request.
+batch = 1500
+
+# Milliseconds to wait between successful API requests. Raise it if you are
+# being rate limited and have no blockchain.info key.
+delay = 0
+
+# Derive and print addresses without contacting the network.
+dry-run = false
+
+# Disable coloured output.
+no-color = false
+
+
+# Secrets, all optional. Keep them here rather than on the command line, where
+# they land in your shell history and are visible to other processes. Restrict
+# this file if you fill any in:  chmod 600 allkeys-keycheck.toml
+#
+# Left commented out because a blank key is worse than a missing one: it is sent
+# and rejected, where a missing one fails before the scan starts.
+[secrets]
+
+# passphrase = "..."             BIP39's optional 25th word
+# blockchain-api-key = "..."     raises the blockchain.info rate limit
+# allkeys-api-key = "ak_..."     required by upload

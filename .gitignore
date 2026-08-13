@@ -1,7 +1,3 @@
 /target
+allkeys-keycheck.toml
 *.txt
-
-# Holds API keys
-.env
-.env.*
-!.env.example
