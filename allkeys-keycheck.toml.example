@@ -1,58 +1,59 @@
 # allkeys-keycheck configuration
 #
-# Runs as it stands: put your keys in input.txt, then run the tool with no
-# arguments. Every setting here has a matching command-line flag that overrides
-# it, so this file holds what stays the same between runs.
-#
-# Precedence, weakest last:  command line  →  environment  →  this file.
+# Runs as it stands: put your keys in input.txt, then run with no arguments.
+# Every setting has a matching command-line flag, which overrides it.
 
 
-# The file of secrets to scan, one hex private key or BIP39 phrase per line.
-# A successful run empties it — keep anything you want to scan twice elsewhere.
+# The file of secrets to scan, one per line. It is a queue: scanned lines leave
+# it as each batch finishes, so keep a copy of anything you want to scan twice.
 input = "input.txt"
 
-# Where the secrets that turned out to have on-chain activity are saved. The
-# file is merged into, never replaced, so runs accumulate. A run needs this,
-# upload below, or both.
+# Where the secrets with on-chain activity are saved. Merged into, never
+# replaced. A run needs this, upload, or both.
 output = "output.txt"
 
-# Submit found keys to allkeys.directory as well. This sends private keys off
-# this machine and cannot be undone. Needs allkeys-api-key at the bottom.
+# Also submit found keys to allkeys.directory. This sends private keys off the
+# machine and cannot be undone. Needs allkeys-api-key below.
 upload = false
 
-# Which indices of each mnemonic chain to scan. A count means that many at each
-# end of the chain; windows are absolute, like "10..110" or "400000..500000".
-# Always quoted — 10..110 is not a TOML number.
-range = "10"
+# Which indices of each mnemonic chain to scan: a count for that many at each
+# end, or absolute windows like "10..110". Always quoted.
+# indices = "10"
 
 # How far each round follows a phrase that turned something up, in indices.
-expand = 400
+# expand = 400
 
-# Scan the range count exactly, following nothing further.
+# Scan the indices count exactly, following nothing further.
 # no-expand = true
 
 # Maximum addresses per API request.
-batch = 1500
+# api-batch = 1500
 
-# Milliseconds to wait between successful API requests. Raise it if you are
-# being rate limited and have no blockchain.info key.
-delay = 0
+# How many phrases to carry through the run at a time.
+# phrase-batch = 50
+
+# Milliseconds to wait between successful API requests.
+# delay = 0
 
 # Derive and print addresses without contacting the network.
-dry-run = false
+# dry-run = true
 
 # Disable coloured output.
-no-color = false
+# no-color = true
 
 
-# Secrets, all optional. Keep them here rather than on the command line, where
-# they land in your shell history and are visible to other processes. Restrict
-# this file if you fill any in:  chmod 600 allkeys-keycheck.toml
+# Secrets. Kept here rather than on the command line, where they are visible to
+# other processes. Restrict the file if you fill any in:  chmod 600
 #
-# Left commented out because a blank key is worse than a missing one: it is sent
-# and rejected, where a missing one fails before the scan starts.
+# Left commented out: a blank key is sent and rejected, where a missing one
+# fails before the scan starts.
 [secrets]
 
-# passphrase = "..."             BIP39's optional 25th word
-# blockchain-api-key = "..."     raises the blockchain.info rate limit
-# allkeys-api-key = "ak_..."     required by upload
+# BIP39's optional 25th word.
+# passphrase = "..."
+
+# Raises the blockchain.info rate limit.
+# blockchain-api-key = "..."
+
+# Required by upload.
+# allkeys-api-key = "ak_..."

@@ -70,10 +70,10 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.3.0
+  allkeys-keycheck 0.4.0
 
       scanning  keys.txt
-          keys  1 unique · 1 duplicate collapsed · 1 line skipped
+         input  1 key · 1 duplicate collapsed · 1 bad line removed
                 line 3: not a 32-byte hex key or a BIP39 phrase
         lookup  blockchain.info · 5 addresses · 1 request · 0.4s
          found  1 of 1 key used
@@ -81,7 +81,7 @@ Then point the tool at it, and say where the results should go:
                 no remaining balance — every address found is already spent
        written  active-keys.txt · 1 on file · 1 new
                 not uploaded — pass -u to submit these to allkeys.directory
-       cleared  keys.txt
+       drained  keys.txt · 2 lines left
 ```
 
 Two things to know before your first real run:
@@ -89,24 +89,24 @@ Two things to know before your first real run:
 - **A run must have somewhere to put its results** — `-o`, `-u`, or both.
   Passing neither is refused before any work starts, so a scan can never finish
   with its findings scrolling off the screen.
-- **The input file is a queue, and a successful run empties it.** See
-  [Input](#input) below.
+- **The input file is a queue.** Scanned lines leave it as each batch finishes.
+  See [The input file is a queue](#the-input-file-is-a-queue).
 
-Both of those paths can live in a config file instead, so a folder you scan
-regularly needs no arguments at all. See [Configuration](#configuration).
+Both paths can live in a config file instead, so a folder you scan regularly
+needs no arguments at all. See [Configuration](#configuration).
 
 Start with `--dry-run` to check how your file parses without making a single
 network request:
 
 ```sh
-./allkeys-keycheck keys.txt --dry-run -r 2
+./allkeys-keycheck keys.txt --dry-run -i 2
 ```
 
 ```
-  allkeys-keycheck 0.3.0
+  allkeys-keycheck 0.4.0
 
       scanning  keys.txt
-         input  2 unique · 1 phrase
+         input  1 key · 1 phrase
 
            key  0000000000000000000000000000000000000000000000000000000000000001
                 p2pkh-uncompressed 1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm
@@ -135,9 +135,10 @@ branch is summarised by its two ends.
    API allows and checked for transaction history.
 4. **Expand.** Phrases that turned something up are followed further down their
    chains until the activity runs out. See [Expansion](#expansion).
-5. **Write.** Findings are merged into the `-o` file and/or uploaded.
-6. **Clear.** Only once every destination has taken its copy, the input file is
-   emptied.
+5. **Write.** Findings are merged into the `-o` file and/or uploaded, and the
+   lines just scanned leave the input file.
+
+Steps 2 to 5 run **fifty phrases at a time**. See [Batches](#batches).
 
 ## Input
 
@@ -149,22 +150,93 @@ One secret per line, of either kind:
 
 Blank lines and `#` comments are ignored. Any line with more than one word is
 read as a mnemonic, so a phrase with a word missing is reported as a bad phrase
-rather than as a bad hex key. Lines that are neither are listed and skipped —
-the first few by line number, then a count.
+rather than as a bad hex key. Lines that are neither are named — the first few
+by line number, then a count — and taken out of the file before the scan
+starts:
+
+```
+         input  2 keys · 3 bad lines removed
+                line 2: 3 words: a mnemonic has 12, 15, 18, 21 or 24
+                line 7: not a 32-byte hex key or a BIP39 phrase
+```
 
 ### The input file is a queue
 
-A successful run empties it. The file is cleared only after every destination
-it was given has taken its copy — the output file merged, the upload accepted,
-or both — so what has been scanned leaves the file and the next run starts on
-new material.
+Each batch's lines leave the file as that batch finishes — once its findings are
+in the output file and, if `-u` was passed, accepted by the upload. So the input
+always holds exactly what is still to do:
 
-- Nothing is cleared if any step failed.
-- `--dry-run` never clears.
-- If the file changed while the scan was running — lines appended that this run
-  never read — it is left alone and the run says so.
+- **An interrupted run resumes where it stopped.** Re-run it and the batches
+  that already finished are gone; only the ones that never ran are left.
+- **Nothing leaves the file until it is safely somewhere else.** A batch whose
+  write or upload failed stops the run with its lines still in place.
+- **Bad lines go first, before the scan starts.** A line that is neither a key
+  nor a phrase will never be scanned, so leaving it would mean every future run
+  reading it, reporting it and stepping over it again. It is named on screen as
+  it goes.
+- **Comments and blank lines stay** exactly where they were.
+- **A key written twice in two spellings has both lines removed**, since both
+  hold the secret that was scanned.
+- **`--dry-run` never touches the file.**
 
-**Keep anything you want to scan twice somewhere other than the input file.**
+The run ends by saying what it left behind:
+
+```
+       drained  input.txt · 3 lines left
+```
+
+If the file is edited by anything else while a run is going, that is noticed at
+the next batch — the run says so and leaves the file alone from then on, rather
+than writing over the change.
+
+**Keep a copy of anything you want to scan twice.**
+
+### Batches
+
+Bare keys are scanned first, all together. The phrases then follow **fifty at a
+time** — `--phrase-batch` sets the number — each batch carried the whole way,
+derived, queried, expanded, written and uploaded, before the next one starts:
+
+```
+         batch  100 keys
+        lookup  blockchain.info · 500 addresses · 1 request · 0.4s
+         found  3 of 100 keys used
+       written  active-keys.txt · 3 on file · 3 new
+
+         batch  1 of 38 · 50 phrases
+        lookup  blockchain.info · 40,000 addresses · 24 requests · 31s
+         found  2 of 50 phrases used
+       written  active-keys.txt · 5 on file · 2 new
+
+         batch  2 of 38 · 50 phrases
+        ...
+
+         total  2,000 scanned · 9 found
+```
+
+Two things follow from that, both of which matter on a long run:
+
+- **Findings reach the destination as they are made.** A run that dies in batch
+  30 keeps everything the first 29 found. Nothing waits for the end.
+- **Memory stays flat.** One batch of addresses is held at a time, so a file of
+  fifty phrases and a file of fifty thousand cost the same to scan.
+
+**Every bare key goes first, in one batch of its own** — wherever they sit in
+the file. They are cheap, five addresses each and one request for thousands of
+them, so putting them up front gets that whole part of the input answered and
+on disk before the expensive part begins. A file of nothing but keys is a
+single batch however long it is, so it carries a count rather than a position —
+there is nothing for it to be first of. The numbering runs over the phrase
+batches, which are what a long run is counting down. A run that takes only one
+pass prints no headings at all.
+
+Batches never change what a scan finds — only when it lands and what it costs
+to get there. Lower `--phrase-batch` to see results sooner on a slow scan;
+raise it to spend fewer, fuller requests on a fast one.
+
+Not to be confused with `--api-batch`, which is how many addresses go into one
+blockchain.info request. That one is about the size of a request; this one is
+about how much of the input a pass carries.
 
 ## Results
 
@@ -185,7 +257,7 @@ the phrase is what restores the wallet, and a scan of a wordlist is usually
 looking for the latter.
 
 **The file accumulates.** A scan is usually one of many — a different slice of a
-wordlist, a wider `--range`, a retry after a rate limit — and no run's findings
+wordlist, a wider `--indices`, a retry after a rate limit — and no run's findings
 are reproducible from the next. So an existing file is read and merged into,
 never replaced:
 
@@ -193,7 +265,7 @@ never replaced:
   input never mentioned them.
 - Nothing is written twice. `0xAB…` and `ab…` are recognised as one key; a
   phrase respaced or recased is recognised as one wallet. Re-running the same
-  scan changes nothing, and widening `--range` adds only what the shallower run
+  scan changes nothing, and widening `--indices` adds only what the shallower run
   never reached.
 - Comments you add by hand are preserved, travelling with the key they sit above.
 - The file is **sorted** — keys first, ascending by value, then phrases grouped
@@ -253,9 +325,9 @@ mistake that strands coins where a purpose-bound scan will never look.
 At the defaults that is **800 addresses per phrase** — 4 layouts × 2 chains ×
 20 indices × 5 encodings. Under one request, and about 2 ms of key derivation.
 
-### Choosing indices with `--range`
+### Choosing indices with `--indices`
 
-Within each chain, `i` is whatever `--range` asks for.
+Within each chain, `i` is whatever `--indices` asks for.
 
 A **bare count** means both ends. `10`, the default, is the first ten indices
 and the last ten — both ends, because the index space runs to 2³¹-1 and a wallet
@@ -265,7 +337,7 @@ zero.
 Anything else is a comma-separated list of **absolute half-open windows**, which
 can sit anywhere in the space:
 
-| `--range` | Indices scanned per chain |
+| `--indices` | Indices scanned per chain |
 | --- | --- |
 | `10` | `0..10` and `2147483638..2147483648` (the default) |
 | `10..110` | 100 indices, starting ten ahead of the usual start |
@@ -288,7 +360,7 @@ that found nothing — as is an empty or backwards window like `5..5` or `7..3`.
 Most phrases control nothing, and for those a shallow pass is the whole answer.
 For the few that *do* turn something up, a shallow pass is exactly the wrong
 answer — a wallet that has been used has addresses running on past wherever the
-scan happened to stop. So a count range is a starting point, not a limit:
+scan happened to stop. So a bare count is a starting point, not a limit:
 
 1. Every phrase is scanned at the count — ten indices from each end by default.
 2. Any phrase with a hit is followed further, `--expand` indices at a time —
@@ -316,9 +388,9 @@ pass over a large wordlist, where a single phrase that hits would otherwise
 keep the run going. The two cannot be passed together.
 
 Expansion applies to the **count form only**. Explicit windows are scanned
-exactly as written and never grow, which is what makes `-r 400000..500000` safe
+exactly as written and never grow, which is what makes `-i 400000..500000` safe
 as one shard of a larger scan — a shard cannot wander into its neighbour's
-range. `--dry-run` never expands either; it contacts no network, so it has
+window. `--dry-run` never expands either; it contacts no network, so it has
 nothing to expand on.
 
 ### Passphrases
@@ -381,10 +453,10 @@ to go, and every other setting at its default — so you change only what you
 want changed:
 
 ```toml
-input  = "input.txt"
-output = "output.txt"
-range  = "10"
-upload = false
+input   = "input.txt"
+output  = "output.txt"
+indices = "10"
+upload  = false
 
 [secrets]
 # allkeys-api-key = "ak_..."
@@ -404,12 +476,12 @@ folder alongside its input and its results. `--config <FILE>` points at a
 specific one instead; naming a file that doesn't exist is an error, while
 simply having no config file is not.
 
-`--init-config` creates the file `0600`, readable only by you, and each run
-warns — naming the file — if it holds an API key and other users can read it.
+`--init-config` creates the file `0600`, readable only by you, since it is
+where your API keys go.
 
 Keys are the long flag names without the leading dashes: `dry-run`, `no-color`,
-`batch`. A key that isn't one of them is an error rather than being ignored, so
-a typo can't quietly cost you a passphrase. `range` is written as a string,
+`api-batch`. A key that isn't one of them is an error rather than being ignored,
+so a typo can't quietly cost you a passphrase. `indices` is written as a string,
 because `10..110` is not a TOML number.
 
 `[secrets]` holds the three values worth keeping off the command line, where
@@ -428,11 +500,12 @@ environment variables for anyone who prefers them.
 | `<FILE>` | `input` in config | Text file of keys and phrases, one per line |
 | `-o, --output <FILE>` | `output` in config | Merge active keys into a file |
 | `-u, --upload` | — | Submit found keys to allkeys.directory |
-| `-r, --range <RANGE>` | `10` | Which indices of each chain to scan — a count, or windows |
+| `-i, --indices <INDICES>` | `10` | Which indices of each chain to scan — a count, or windows |
 | `--expand <N>` | `400` | How far each expansion round reaches |
 | `--no-expand` | — | Scan the count exactly, never following it further |
 | `--passphrase <WORD>` | config / `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
-| `--batch <N>` | `1500` | Max addresses per API request |
+| `--api-batch <N>` | `1500` | Max addresses per API request |
+| `--phrase-batch <N>` | `50` | How many phrases to carry through the run at a time |
 | `--delay <MS>` | `0` | Pause between successful API requests |
 | `--blockchain-api-key <KEY>` | config / `$BLOCKCHAIN_API_KEY` | blockchain.info key, raises the rate limit |
 | `--allkeys-api-key <KEY>` | config / `$ALLKEYS_API_KEY` | allkeys.directory key, required by `--upload` |
@@ -488,8 +561,8 @@ address, rather than writing an output file that quietly omits it.
 - **The output file is created `0600`** — readable only by you — because a
   world-readable list of spendable keys is a much worse outcome than a failed
   write.
-- **`allkeys-keycheck.toml` is gitignored**, `--init-config` creates it `0600`,
-  and a run warns if it holds an API key and other users can read it.
+- **`allkeys-keycheck.toml` is gitignored**, and `--init-config` creates it
+  `0600` — readable only by you, since it is where your API keys go.
 - **Pass secrets through the environment, not the command line.** Anything on
   the command line is visible in your shell history and to other processes.
 

@@ -1,7 +1,7 @@
 //! The output file: an accumulating record of everything ever found.
 //!
 //! A scan is usually one of many — a different slice of a wordlist, a wider
-//! `--range`, a retry after a rate limit — and the findings of one run are not
+//! `--indices`, a retry after a rate limit — and the findings of one run are not
 //! reproducible from the next. So the file is merged into rather than replaced:
 //! a re-run adds what is new, keeps what is already there, and never leaves you
 //! with fewer keys than you started with.

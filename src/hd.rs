@@ -120,16 +120,16 @@ impl FromStr for Span {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let spec = text.trim();
         if spec.is_empty() {
-            return Err("--range needs a value: a count, or a window like 10..110".into());
+            return Err("--indices needs a value: a count, or a window like 10..110".into());
         }
 
         // A bare count is the common case and means both ends. Only when it is
         // the whole value: `0..100,50` would otherwise be two different
         // languages in one list.
         if !spec.contains("..") && !spec.contains(',') {
-            let depth = index(spec, "--range")?;
+            let depth = index(spec, "--indices")?;
             if depth == 0 {
-                return Err("--range 0 searches no indices at all".into());
+                return Err("--indices 0 searches no indices at all".into());
             }
             let depth = depth.min(HARDENED);
             return Ok(Self {
@@ -190,7 +190,7 @@ fn window(part: &str) -> Result<Range<u32>, String> {
     let text = part.trim();
     let (start, end) = text
         .split_once("..")
-        .ok_or_else(|| format!("--range {text:?}: a window is written start..end"))?;
+        .ok_or_else(|| format!("--indices {text:?}: a window is written start..end"))?;
 
     let start = if start.trim().is_empty() {
         0
@@ -207,7 +207,7 @@ fn window(part: &str) -> Result<Range<u32>, String> {
     // indices, and the highest index that can be reached is 2147483647.
     if start >= end {
         return Err(format!(
-            "--range {text:?}: the window is empty — start must be below end"
+            "--indices {text:?}: the window is empty — start must be below end"
         ));
     }
     Ok(start..end)

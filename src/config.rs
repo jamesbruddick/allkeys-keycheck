@@ -27,10 +27,11 @@ pub struct Config {
     pub input: Option<PathBuf>,
     pub output: Option<PathBuf>,
     pub upload: Option<bool>,
-    pub range: Option<String>,
+    pub indices: Option<String>,
     pub expand: Option<u32>,
     pub no_expand: Option<bool>,
-    pub batch: Option<usize>,
+    pub api_batch: Option<usize>,
+    pub phrase_batch: Option<u64>,
     pub delay: Option<u64>,
     pub dry_run: Option<bool>,
     pub no_color: Option<bool>,
@@ -49,28 +50,11 @@ pub struct Secrets {
     pub allkeys_api_key: Option<String>,
 }
 
-impl Secrets {
-    /// Whether this file is worth protecting. A config of nothing but paths
-    /// and counts is not a secret, and warning about its permissions would
-    /// only teach the reader to ignore the warning.
-    fn any_set(&self) -> bool {
-        [
-            self.passphrase.as_deref(),
-            self.blockchain_api_key.as_deref(),
-            self.allkeys_api_key.as_deref(),
-        ]
-        .iter()
-        .any(|value| value.is_some_and(|v| !v.is_empty()))
-    }
-}
-
 /// A loaded config, and where it came from, so the run can name the file in
 /// its banner and in any warning about it.
 pub struct Loaded {
     pub path: Option<PathBuf>,
     pub config: Config,
-    /// The file holds at least one secret and other users can read it.
-    pub exposed: bool,
 }
 
 /// Read `--config <FILE>`, or `./allkeys-keycheck.toml` if it exists.
@@ -86,7 +70,6 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded, String> {
                 return Ok(Loaded {
                     path: None,
                     config: Config::default(),
-                    exposed: false,
                 });
             }
             default
@@ -99,7 +82,6 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded, String> {
         .map_err(|e| format!("could not parse {}: {}", path.display(), one_line(&e)))?;
 
     Ok(Loaded {
-        exposed: config.secrets.any_set() && is_world_readable(&path),
         path: Some(path),
         config,
     })
@@ -134,19 +116,6 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
-/// True when a file is readable by group or other. Callers warn rather than
-/// refuse: it is the user's machine and their choice.
-#[cfg(unix)]
-fn is_world_readable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o077 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_world_readable(_path: &Path) -> bool {
-    false
-}
-
 /// toml renders an error as a position, a drawing of the offending line, and
 /// then what is actually wrong with it. The UI prints errors as one row, so
 /// keep the two ends — where, and why — and drop the drawing between them.
@@ -179,25 +148,13 @@ mod tests {
         assert!(config.secrets.passphrase.is_none());
         assert!(config.secrets.blockchain_api_key.is_none());
         assert!(config.secrets.allkeys_api_key.is_none());
-        assert!(!config.secrets.any_set());
-    }
-
-    /// A key present but blank is not a secret to protect — and is not a key
-    /// the API would accept either.
-    #[test]
-    fn a_blank_secret_does_not_count_as_one() {
-        let config: Config = toml::from_str("[secrets]\nallkeys-api-key = \"\"\n").unwrap();
-        assert!(!config.secrets.any_set());
-
-        let config: Config = toml::from_str("[secrets]\nallkeys-api-key = \"ak_x\"\n").unwrap();
-        assert!(config.secrets.any_set());
     }
 
     #[test]
     fn a_partial_file_leaves_the_rest_unset() {
-        let config: Config = toml::from_str("range = \"10..110\"\n").unwrap();
-        assert_eq!(config.range.as_deref(), Some("10..110"));
-        assert!(config.batch.is_none());
+        let config: Config = toml::from_str("indices = \"10..110\"\n").unwrap();
+        assert_eq!(config.indices.as_deref(), Some("10..110"));
+        assert!(config.api_batch.is_none());
     }
 
     /// A typo in a key must be reported, not silently ignored — a passphrase

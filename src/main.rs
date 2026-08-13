@@ -33,6 +33,16 @@ const MAX_LISTED_REJECTS: usize = 5;
 /// than printing every line — a single mnemonic can derive tens of thousands.
 const MAX_LISTED_ADDRESSES: usize = 32;
 
+/// How many phrases one batch carries through the whole run by default —
+/// derived, queried, expanded and written — before the next batch starts.
+///
+/// A phrase is hundreds of addresses at the default range, so a file of
+/// thousands of them would otherwise be held in memory all at once, and nothing
+/// would reach the output file until the last one had been queried. Bare keys
+/// are not counted: five addresses each is not what makes a run large.
+/// `--phrase-batch` overrides it.
+const PHRASES_PER_BATCH: u64 = 50;
+
 /// Examples and the one rule a first run can trip over. Shown under both `-h`
 /// and `--help`: someone reaching for the short form is usually after the
 /// invocation, not the prose.
@@ -54,7 +64,7 @@ Results need somewhere to go: pass -o, -u, or both, unless --dry-run.";
 // unpacked a week ago wants the answer without starting a scan.
 //
 // Every long_help below is the short line plus the detail a run can go wrong
-// without — what is irreversible, what is emptied, what a value means. The
+// without — what is irreversible, what a value means. The
 // rest lives in the README, which has room to explain it.
 #[command(
     version,
@@ -76,9 +86,10 @@ struct Args {
     /// Each line is a hex private key or a BIP39 phrase of 12, 15, 18, 21 or 24
     /// words. Blank lines and `#` comments are skipped.
     ///
-    /// The file is a queue: a successful run empties it, so the next run starts
-    /// on new material. Keep anything you want to scan twice elsewhere.
-    /// `--dry-run` leaves it alone.
+    /// The file is a queue: bad lines are removed before the scan starts, and
+    /// each batch's lines leave as that batch finishes, so an interrupted run
+    /// resumes where it stopped. Comments and blanks stay. `--dry-run` leaves
+    /// the file alone entirely.
     ///
     /// Optional here if `input` is set in allkeys-keycheck.toml.
     #[arg(value_name = "FILE")]
@@ -100,8 +111,8 @@ struct Args {
     // A plain placeholder, with the two forms named in the line above instead:
     // spelling the grammar out here made this the widest option in the list,
     // and the widest option sets the description column for every other one.
-    #[arg(short, long, default_value = "10", value_name = "RANGE")]
-    range: hd::Span,
+    #[arg(short = 'i', long, default_value = "10", value_name = "INDICES")]
+    indices: hd::Span,
 
     /// BIP39 passphrase, the optional 25th word
     ///
@@ -136,7 +147,7 @@ struct Args {
     /// comes back empty. Raise it to reach further per request on a phrase you
     /// expect to be busy; lower it to stop sooner after the activity ends.
     ///
-    /// Applies to a count --range only. Explicit windows never expand.
+    /// Applies to a count --indices only. Explicit windows never expand.
     #[arg(
         long,
         default_value_t = hd::EXPANSION_STEP,
@@ -146,7 +157,7 @@ struct Args {
     )]
     expand: u32,
 
-    /// Scan the --range count exactly, without following it further
+    /// Scan the --indices count exactly, without following it further
     ///
     /// Turns expansion off, so a count behaves like the windows it names and
     /// nothing more. Useful for a fixed-cost pass over a large wordlist, where
@@ -156,10 +167,27 @@ struct Args {
 
     /// Maximum addresses per API request
     ///
-    /// Batches are additionally capped by request body size, which is the limit
-    /// the server actually enforces.
+    /// Requests are additionally capped by body size, which is the limit the
+    /// server actually enforces.
     #[arg(long, default_value_t = 1500, value_name = "N")]
-    batch: usize,
+    api_batch: usize,
+
+    /// How many phrases to carry through the run at a time
+    ///
+    /// Each batch is derived, queried, expanded and written before the next one
+    /// starts, so findings reach the output file as they are made and only one
+    /// batch of addresses is held in memory. Bare keys are not counted towards
+    /// it: five addresses each is not what makes a run large.
+    ///
+    /// Lower it to see results sooner on a slow scan; raise it to spend fewer,
+    /// fuller requests on a fast one.
+    #[arg(
+        long,
+        default_value_t = PHRASES_PER_BATCH,
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "N"
+    )]
+    phrase_batch: u64,
 
     /// Milliseconds to wait between successful API requests
     #[arg(long, default_value_t = 0, value_name = "MS")]
@@ -254,7 +282,7 @@ fn main() -> ExitCode {
         };
     }
 
-    match run(&args, &ui, path.as_ref()) {
+    match run(&args, &ui, path.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             ui.clear();
@@ -269,7 +297,7 @@ fn main() -> ExitCode {
 fn load_config(
     args: &mut Args,
     matches: &clap::ArgMatches,
-) -> Result<Option<(PathBuf, bool)>, String> {
+) -> Result<Option<PathBuf>, String> {
     // --init-config writes the file; reading one first would only turn a
     // typo in an existing config into a failure to create a new one.
     if args.init_config {
@@ -277,9 +305,9 @@ fn load_config(
     }
 
     let loaded = config::load(args.config.as_deref())?;
-    let found = loaded.path.map(|path| (path, loaded.exposed));
+    let path = loaded.path;
     merge_config(args, matches, loaded.config)?;
-    Ok(found)
+    Ok(path)
 }
 
 /// True when the user supplied nothing for this argument — no flag, no
@@ -307,11 +335,11 @@ fn merge_config(
     if unset(matches, "output") {
         args.output = config.output;
     }
-    if unset(matches, "range") {
-        if let Some(range) = config.range {
-            args.range = range
+    if unset(matches, "indices") {
+        if let Some(indices) = config.indices {
+            args.indices = indices
                 .parse()
-                .map_err(|e| format!("range = \"{range}\" in the config file: {e}"))?;
+                .map_err(|e| format!("indices = \"{indices}\" in the config file: {e}"))?;
         }
     }
     if unset(matches, "expand") {
@@ -324,9 +352,19 @@ fn merge_config(
             args.expand = expand;
         }
     }
-    if unset(matches, "batch") {
-        if let Some(batch) = config.batch {
-            args.batch = batch;
+    if unset(matches, "api_batch") {
+        if let Some(batch) = config.api_batch {
+            args.api_batch = batch;
+        }
+    }
+    if unset(matches, "phrase_batch") {
+        if let Some(batch) = config.phrase_batch {
+            if batch == 0 {
+                return Err("phrase-batch = 0 in the config file: a batch of no \
+                            phrases would never get through the input"
+                    .into());
+            }
+            args.phrase_batch = batch;
         }
     }
     if unset(matches, "delay") {
@@ -356,7 +394,7 @@ fn merge_config(
     Ok(())
 }
 
-fn run(args: &Args, ui: &Ui, config_file: Option<&(PathBuf, bool)>) -> Result<(), String> {
+fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     ui.title(env!("CARGO_PKG_VERSION"));
     ui.gap();
 
@@ -369,15 +407,8 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&(PathBuf, bool)>) -> Result<()
     ui.row("scanning", &input.display().to_string());
 
     // The path only, never a value — this output gets pasted into bug reports.
-    if let Some((path, exposed)) = config_file {
+    if let Some(path) = config_file {
         ui.row("config", &path.display().to_string());
-        if *exposed {
-            ui.warn(&format!(
-                "{} holds an API key and is readable by other users; restrict it \
-                 with chmod 600",
-                path.display()
-            ));
-        }
     }
 
     // A scan whose results go nowhere is almost always a mistake, so it is
@@ -412,19 +443,27 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&(PathBuf, bool)>) -> Result<()
     let count = parsed.inputs.len();
 
     // Related figures share one line, separated by a middot, so the run reads
-    // as a handful of rows rather than a column of one-fact lines. The gutter
-    // label carries the noun, so the values don't repeat it.
-    let mut facts = vec![format!("{} unique", ui::commas(count as u64))];
+    // as a handful of rows rather than a column of one-fact lines.
+    //
+    // Both kinds are named in the value rather than one of them in the label:
+    // the two are scanned differently — keys in a single pass, phrases in
+    // batches — so which of them a file holds is the useful fact, and a label
+    // that changed with the mix made the same run read differently every time.
     let phrases = parsed.phrases();
-    // Only worth breaking out when the file holds both: when it is all phrases
-    // the label below already says so, and the count would just repeat it.
-    if phrases > 0 && phrases < count {
+    let keys = count - phrases;
+    let mut facts = Vec::new();
+    if keys > 0 {
+        facts.push(format!("{} key{}", ui::commas(keys as u64), plural(keys)));
+    }
+    if phrases > 0 {
         facts.push(format!(
             "{} phrase{}",
             ui::commas(phrases as u64),
             plural(phrases)
         ));
     }
+    // No empty case to cover: a file with nothing usable in it is refused by
+    // `parse_input` before there is a row to print.
     if parsed.duplicates > 0 {
         facts.push(format!(
             "{} duplicate{} collapsed",
@@ -433,25 +472,25 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&(PathBuf, bool)>) -> Result<()
         ));
     }
     if !parsed.rejected.is_empty() {
+        let bad = parsed.rejected.len();
         facts.push(format!(
-            "{} line{} skipped",
-            ui::commas(parsed.rejected.len() as u64),
-            plural(parsed.rejected.len())
+            "{} bad line{} {}",
+            ui::commas(bad as u64),
+            plural(bad),
+            // --dry-run reports what a real run would do without doing it, and
+            // taking the lines out is doing it.
+            match args.dry_run {
+                true => "skipped",
+                false => "removed",
+            }
         ));
     }
-    // "keys and phrases" would overflow the gutter, so a mixed file gets the
-    // one word that covers both without naming either.
-    let label = match phrases {
-        0 => "keys",
-        n if n == count => "phrases",
-        _ => "input",
-    };
-    ui.row(label, &facts.join(&ui.dim(" · ")));
+    ui.row("input", &facts.join(&ui.dim(" · ")));
 
     // Only a sample: a file with thousands of bad lines would otherwise push
     // the results off the screen entirely.
-    for message in parsed.rejected.iter().take(MAX_LISTED_REJECTS) {
-        ui.cont(message);
+    for bad in parsed.rejected.iter().take(MAX_LISTED_REJECTS) {
+        ui.cont(&format!("line {}: {}", bad.number, bad.reason));
     }
     if parsed.rejected.len() > MAX_LISTED_REJECTS {
         ui.cont(&format!(
@@ -460,74 +499,292 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&(PathBuf, bool)>) -> Result<()
         ));
     }
 
-    let (mut entries, phrases_by_entry) = derive_all(parsed.inputs, &args.range, ui)?;
+    let mut queue = Queue::new(input, &text);
 
-    if args.dry_run {
-        show_addresses(&entries, ui);
-        return Ok(());
+    // Before the scan rather than after it: nothing will ever be scanned from a
+    // line that named no secret, so leaving it in the queue would mean every
+    // run from here on reading it, reporting it and stepping over it again.
+    if !args.dry_run && !parsed.rejected.is_empty() {
+        let bad: Vec<usize> = parsed.rejected.iter().map(|line| line.number).collect();
+        queue.drain(&bad, ui)?;
     }
 
-    let client = api::Client::new(args.delay, args.blockchain_api_key.clone(), ui)?;
-    let mut hits = check(&client, &entries, args, ui)?;
+    // One batch at a time, all the way through: a batch that finds something
+    // has it on disk before the next one starts, and only one batch's worth of
+    // addresses is ever held in memory.
+    let batches = in_batches(parsed.inputs, args.phrase_batch as usize);
+    let total = batches.len();
+    // The keys are one pass however many there are, so numbering runs over the
+    // phrase batches only — those are the ones a reader is counting down.
+    let numbered = batches.iter().filter(|b| holds_phrases(b)).count();
 
-    // A count span is a starting point, so the phrases that turned something up
-    // are followed further out. Explicit windows are taken as written, and
-    // --no-expand asks for a count to be taken that way too.
-    if let Some(start) = args.range.count().filter(|_| !args.no_expand) {
-        expand(
-            &client,
-            &mut entries,
-            &phrases_by_entry,
-            &mut hits,
-            start,
-            args,
-            ui,
-        )?;
+    let client = match args.dry_run {
+        true => None,
+        false => Some(api::Client::new(args.delay, args.blockchain_api_key.clone(), ui)?),
+    };
+    let mut found = 0;
+    let mut numbering = 0;
+
+    for batch in batches {
+        // Only worth a heading when there is more than one: a single batch is
+        // just "the run", and a heading over the whole of it says nothing.
+        if total > 1 {
+            ui.gap();
+            ui.row("batch", &heading(&batch, &mut numbering, numbered, ui));
+        }
+
+        // Noted before `derive_all` consumes the batch: these are the lines
+        // that leave the input once the batch is done with.
+        let scanned: Vec<usize> = batch.iter().flat_map(Input::lines).collect();
+        let (mut entries, phrases_by_entry) = derive_all(batch, &args.indices, ui)?;
+
+        let Some(client) = &client else {
+            show_addresses(&entries, ui);
+            continue;
+        };
+
+        let mut hits = check(client, &entries, args, ui)?;
+
+        // A count span is a starting point, so the phrases that turned something
+        // up are followed further out. Explicit windows are taken as written,
+        // and --no-expand asks for a count to be taken that way too.
+        if let Some(start) = args.indices.count().filter(|_| !args.no_expand) {
+            expand(
+                client,
+                &mut entries,
+                &phrases_by_entry,
+                &mut hits,
+                start,
+                args,
+                ui,
+            )?;
+        }
+
+        let active = write_results(&entries, &hits, args, ui)?;
+        found += active.len();
+
+        // Every batch sends its own findings, so a run interrupted halfway has
+        // already submitted what it found up to there.
+        if let (Some(token), false) = (&upload_token, active.is_empty()) {
+            upload_keys(&active, token, ui)?;
+        }
+
+        // Last, once every destination has taken its copy of this batch:
+        // anything that failed above returned instead, leaving these lines in
+        // the input so the run can be repeated.
+        queue.drain(&scanned, ui)?;
     }
 
-    let active = write_results(&entries, &hits, args, ui)?;
+    // The per-batch rows say what each one did; this says what the run did.
+    if total > 1 && !args.dry_run {
+        ui.gap();
+        ui.row(
+            "total",
+            &format!(
+                "{} scanned {}",
+                ui::commas(count as u64),
+                ui.dim(&format!(
+                    "· {} found",
+                    if found == 0 {
+                        "nothing".to_string()
+                    } else {
+                        ui::commas(found as u64)
+                    }
+                ))
+            ),
+        );
+    }
 
-    if let Some(token) = upload_token {
-        upload_keys(&active, &token, ui)?;
-    } else if !active.is_empty() {
-        // Reaching here means an output file was given: the two are required
-        // to be mutually exhaustive, so the only missing destination is the
-        // upload.
+    // Both said once, at the end, rather than repeated under every batch that
+    // happened to find something. On a single-batch run that puts them exactly
+    // where they were before there was any batching.
+    if upload_token.is_some() && found == 0 {
+        ui.row("upload", "nothing to send");
+    } else if upload_token.is_none() && found > 0 {
+        // Reaching here means an output file was given: the two are required to
+        // be mutually exhaustive, so the only missing destination is the upload.
         ui.cont("not uploaded — pass -u to submit these to allkeys.directory");
     }
 
-    // Last, once every destination has taken its copy: reaching here means the
-    // output file is written and the upload, if one was asked for, came back
-    // accepted. Anything that failed above returned instead, leaving the input
-    // where it was so the run can be repeated.
-    clear_input(input, &text, ui)?;
+    // The input is a queue, so what is left in it is the state the next run
+    // starts from — worth stating, whether that is nothing or a remainder the
+    // run never scanned. Skipped when the file stopped being this run's to
+    // describe: the warning at the time said so, and a count taken from a copy
+    // that is no longer what is on disk would be worse than no count at all.
+    if !args.dry_run && queue.draining() {
+        let left = queue.remaining();
+        ui.row(
+            "drained",
+            &match left {
+                0 => input.display().to_string(),
+                n => format!(
+                    "{} {}",
+                    input.display(),
+                    ui.dim(&format!("· {} line{} left", ui::commas(n as u64), plural(n)))
+                ),
+            },
+        );
+    }
 
     println!();
     Ok(())
 }
 
-/// Empty the input file now that everything it held has been scanned and the
-/// results are somewhere durable.
+/// The input file as a queue, drained a batch at a time.
 ///
-/// What is on disk is compared against the text this run read: an input that is
-/// appended to while a long scan runs would otherwise lose the lines added
-/// after the read, which were never scanned. A changed file is left alone
-/// rather than treated as an error — the scan itself succeeded, and there is
-/// nothing to retry.
-fn clear_input(path: &Path, scanned: &str, ui: &Ui) -> Result<(), String> {
-    let current = fs::read_to_string(path)
-        .map_err(|e| format!("could not re-read {}: {e}", path.display()))?;
-    if current != scanned {
-        ui.warn(&format!(
-            "{} changed during the scan; leaving it as it is",
-            path.display()
-        ));
-        return Ok(());
+/// A batch that has been written and uploaded is done with, so the lines it
+/// came from leave the file and the next run starts on what is left. Bad lines
+/// go before the scan even begins, since nothing will ever be scanned from
+/// them. Comments and blanks stay exactly where they are.
+///
+/// Removal is by line number against a copy held here, rather than by matching
+/// text on disk, because two lines can hold the same secret written two ways and
+/// both have to go. What was last written is kept so an edit made by someone
+/// else can be spotted: the file is then left alone for the rest of the run
+/// rather than being rewritten over the top of their change.
+struct Queue {
+    path: PathBuf,
+    /// By original line number, `None` once that line has been scanned.
+    lines: Vec<Option<String>>,
+    /// What this run last put on disk, or read from it.
+    on_disk: String,
+    draining: bool,
+}
+
+impl Queue {
+    fn new(path: &Path, text: &str) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            lines: text.lines().map(|line| Some(line.to_string())).collect(),
+            on_disk: text.to_string(),
+            draining: true,
+        }
     }
 
-    fs::write(path, "").map_err(|e| format!("could not empty {}: {e}", path.display()))?;
-    ui.row("cleared", &path.display().to_string());
-    Ok(())
+    /// Take a finished batch's lines out of the file.
+    fn drain(&mut self, scanned: &[usize], ui: &Ui) -> Result<(), String> {
+        if !self.draining {
+            return Ok(());
+        }
+
+        // Checked every time, not once at the start: the file is being rewritten
+        // as the run goes, so the only thing that proves nobody else has touched
+        // it is that what is there is what this run last put there.
+        let current = fs::read_to_string(&self.path)
+            .map_err(|e| format!("could not re-read {}: {e}", self.path.display()))?;
+        if current != self.on_disk {
+            ui.warn(&format!(
+                "{} changed during the run; leaving the rest of it alone",
+                self.path.display()
+            ));
+            self.draining = false;
+            return Ok(());
+        }
+
+        for &number in scanned {
+            if let Some(line) = self.lines.get_mut(number - 1) {
+                *line = None;
+            }
+        }
+
+        let remaining = self.render();
+        fs::write(&self.path, &remaining)
+            .map_err(|e| format!("could not update {}: {e}", self.path.display()))?;
+        self.on_disk = remaining;
+        Ok(())
+    }
+
+    fn render(&self) -> String {
+        let kept: Vec<&str> = self.lines.iter().flatten().map(String::as_str).collect();
+        match kept.is_empty() {
+            true => String::new(),
+            false => format!("{}\n", kept.join("\n")),
+        }
+    }
+
+    /// How many lines are still in the file. Only meaningful while this run is
+    /// still the only thing writing to it — see `draining`.
+    fn remaining(&self) -> usize {
+        self.lines.iter().flatten().count()
+    }
+
+    /// Whether the input is still this run's to drain. False once someone else
+    /// has edited it, after which the file is left alone and nothing here
+    /// describes what is in it.
+    fn draining(&self) -> bool {
+        self.draining
+    }
+}
+
+/// Split the input into batches: every bare key first, in one batch of its own,
+/// then the phrases `per_batch` at a time.
+///
+/// Keys go first because they are cheap — five addresses each, one request for
+/// thousands of them — so putting them up front gets that whole part of the
+/// input answered and on disk before the expensive part begins. And they are
+/// never split: what makes a run large is phrases.
+fn in_batches(inputs: Vec<Input>, per_batch: usize) -> Vec<Vec<Input>> {
+    // Stable, so within each group the file's order survives.
+    let (keys, phrases): (Vec<Input>, Vec<Input>) = inputs
+        .into_iter()
+        .partition(|input| matches!(input.kind, InputKind::Key(_)));
+
+    let mut batches = Vec::new();
+    if !keys.is_empty() {
+        batches.push(keys);
+    }
+
+    let mut current = Vec::with_capacity(per_batch);
+    for phrase in phrases {
+        current.push(phrase);
+        if current.len() == per_batch {
+            batches.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+
+    // An input of nothing at all is still one batch, which reports an empty
+    // scan rather than silently doing nothing.
+    if batches.is_empty() {
+        batches.push(Vec::new());
+    }
+    batches
+}
+
+/// What a batch holds, for its heading: the counts that are actually in it.
+fn holds_phrases(batch: &[Input]) -> bool {
+    batch
+        .iter()
+        .any(|input| matches!(input.kind, InputKind::Phrase(_)))
+}
+
+/// The heading over one batch: what it holds, and for a phrase batch how far
+/// through the phrases it is.
+///
+/// The keys are a single pass whatever their number, so they get a count and no
+/// position — there is nothing for them to be first of. Only the phrase batches
+/// are numbered, and only when there is more than one of them: "1 of 1" is a
+/// position that answers a question nobody asked.
+fn heading(batch: &[Input], numbering: &mut usize, numbered: usize, ui: &Ui) -> String {
+    let size = ui::commas(batch.len() as u64);
+
+    if !holds_phrases(batch) {
+        return format!("{size} key{}", plural(batch.len()));
+    }
+
+    *numbering += 1;
+    let phrases = format!("{size} phrase{}", plural(batch.len()));
+    if numbered == 1 {
+        return phrases;
+    }
+    format!(
+        "{} of {} {}",
+        ui::commas(*numbering as u64),
+        ui::commas(numbered as u64),
+        ui.dim(&format!("· {phrases}"))
+    )
 }
 
 /// Submit the found keys. Passing `--upload` is the confirmation; nothing is
@@ -713,9 +970,20 @@ where
 struct Input {
     /// Line number in the input file, so a failure below can name it.
     number: usize,
+    /// Every other line that named the same secret — the duplicates this one
+    /// stood in for. Kept so that finishing with this secret takes all of its
+    /// spellings out of the input, not just the one that was scanned.
+    repeats: Vec<usize>,
     /// The line as it was written, for the output file to echo back.
     raw: String,
     kind: InputKind,
+}
+
+impl Input {
+    /// Every line in the file this secret was written on.
+    fn lines(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::once(self.number).chain(self.repeats.iter().copied())
+    }
 }
 
 enum InputKind {
@@ -759,8 +1027,17 @@ fn classify(line: &str, passphrase: &str) -> Result<InputKind, String> {
 struct Parsed {
     inputs: Vec<Input>,
     duplicates: usize,
-    /// One message per rejected line, in file order.
-    rejected: Vec<String>,
+    /// The lines that were neither a key nor a phrase, in file order.
+    rejected: Vec<Rejected>,
+}
+
+/// A line that named no secret, and why. The number is kept as well as the
+/// reason because the line is taken out of the input before the scan starts:
+/// nothing will ever be scanned from it, so leaving it there would mean every
+/// future run reading and reporting it again.
+struct Rejected {
+    number: usize,
+    reason: String,
 }
 
 impl Parsed {
@@ -784,8 +1061,8 @@ impl Parsed {
 /// Nothing is derived here. Deriving a phrase's addresses is most of the work
 /// of a run, so it is left to the caller rather than done during the parse.
 fn parse_input(text: &str, passphrase: &str, ui: &Ui) -> Result<Parsed, String> {
-    let mut seen = HashSet::new();
-    let mut inputs = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut inputs: Vec<Input> = Vec::new();
     let mut rejected = Vec::new();
     let mut duplicates = 0;
 
@@ -809,14 +1086,25 @@ fn parse_input(text: &str, passphrase: &str, ui: &Ui) -> Result<Parsed, String> 
             match classified {
                 // Both kinds dedupe on what identifies the wallet — the seed
                 // for a phrase, the normalized hex for a key — so the same
-                // secret written two ways is read in only once.
-                Ok(kind) if !seen.insert(kind.id()) => duplicates += 1,
-                Ok(kind) => inputs.push(Input {
-                    number,
-                    raw: line.to_string(),
-                    kind,
-                }),
-                Err(e) => rejected.push(format!("line {number}: {e}")),
+                // secret written two ways is read in only once. The line it
+                // repeated on is remembered rather than forgotten: it holds the
+                // same secret, so it leaves the input when that secret is done.
+                Ok(kind) => match seen.get(&kind.id()) {
+                    Some(&first) => {
+                        inputs[first].repeats.push(number);
+                        duplicates += 1;
+                    }
+                    None => {
+                        seen.insert(kind.id(), inputs.len());
+                        inputs.push(Input {
+                            number,
+                            repeats: Vec::new(),
+                            raw: line.to_string(),
+                            kind,
+                        });
+                    }
+                },
+                Err(reason) => rejected.push(Rejected { number, reason }),
             }
             Ok(())
         },
@@ -916,7 +1204,7 @@ fn check(
         .collect();
 
     let started = Instant::now();
-    let (hits, requests) = query(client, &addresses, args.batch, "querying", ui)?;
+    let (hits, requests) = query(client, &addresses, args.api_batch, "querying", ui)?;
     ui.row(
         "lookup",
         &[
@@ -999,7 +1287,7 @@ fn expand(
     args: &Args,
     ui: &Ui,
 ) -> Result<(), String> {
-    let batch = args.batch;
+    let batch = args.api_batch;
     expand_with(entries, phrases, hits, start, args.expand, ui, |addresses| {
         query(client, addresses, batch, "expanding", ui)
     })
@@ -1351,8 +1639,9 @@ mod tests {
 
         // The rest are the defaults written out, so copying the file changes
         // nothing about how a scan behaves.
-        assert_eq!(args.range.count(), Some(10));
-        assert_eq!(args.batch, 1500);
+        assert_eq!(args.indices.count(), Some(10));
+        assert_eq!(args.api_batch, 1500);
+        assert_eq!(args.phrase_batch, PHRASES_PER_BATCH);
         assert_eq!(args.delay, 0);
         assert_eq!(args.passphrase, "");
         assert!(!args.upload);
@@ -1529,8 +1818,36 @@ mod tests {
     fn no_expand_leaves_a_count_where_it_started() {
         let matches = Args::command().get_matches_from(["allkeys-keycheck", "--no-expand"]);
         let args = Args::from_arg_matches(&matches).unwrap();
-        assert!(args.range.count().is_some());
-        assert!(args.range.count().filter(|_| !args.no_expand).is_none());
+        assert!(args.indices.count().is_some());
+        assert!(args.indices.count().filter(|_| !args.no_expand).is_none());
+    }
+
+    /// A batch of no phrases would never get through the input. Refused from
+    /// either direction, like a step of zero.
+    #[test]
+    fn a_phrase_batch_of_zero_is_refused() {
+        assert!(Args::try_parse_from(["allkeys-keycheck", "--phrase-batch", "0"]).is_err());
+
+        let matches = Args::command().get_matches_from(["allkeys-keycheck"]);
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        let config = toml::from_str("phrase-batch = 0\n").unwrap();
+        assert!(merge_config(&mut args, &matches, config).is_err());
+    }
+
+    /// The two batch sizes are different things — addresses per request and
+    /// phrases per pass — so neither may quietly stand in for the other.
+    #[test]
+    fn the_two_batch_sizes_are_separate() {
+        let matches = Args::command().get_matches_from([
+            "allkeys-keycheck",
+            "--api-batch",
+            "900",
+            "--phrase-batch",
+            "5",
+        ]);
+        let args = Args::from_arg_matches(&matches).unwrap();
+        assert_eq!(args.api_batch, 900);
+        assert_eq!(args.phrase_batch, 5);
     }
 
     /// A step of zero would ask for rounds of no indices, which would either
@@ -1543,6 +1860,78 @@ mod tests {
         let mut args = Args::from_arg_matches(&matches).unwrap();
         let config = toml::from_str("expand = 0\n").unwrap();
         assert!(merge_config(&mut args, &matches, config).is_err());
+    }
+
+    /// A line of the given kind — 'p' for a phrase, anything else a key —
+    /// which is all `in_batches` looks at.
+    fn line(kind: char) -> Input {
+        let raw = match kind {
+            'p' => PHRASE.to_string(),
+            _ => "0".repeat(64),
+        };
+        let parsed = parse_input(&raw, "", &Ui::new(true)).expect("a valid line parses");
+        parsed.inputs.into_iter().next().expect("one line, one input")
+    }
+
+    fn kinds(batch: &[Input]) -> String {
+        batch
+            .iter()
+            .map(|i| match i.kind {
+                InputKind::Phrase(_) => 'p',
+                InputKind::Key(_) => 'k',
+            })
+            .collect()
+    }
+
+    /// Every key goes in the first batch, wherever the file had them, and the
+    /// phrases follow `per_batch` at a time.
+    #[test]
+    fn keys_come_first_then_phrases_in_batches() {
+        let input: Vec<Input> = "kppkpkpk".chars().map(line).collect();
+        let batches = in_batches(input, 2);
+
+        let shapes: Vec<String> = batches.iter().map(|b| kinds(b)).collect();
+        assert_eq!(shapes, ["kkkk", "pp", "pp"]);
+    }
+
+    /// A file of nothing but keys is one batch however long it is: five
+    /// addresses each is not what makes a run large.
+    #[test]
+    fn keys_alone_are_never_split() {
+        let input: Vec<Input> = (0..10).map(|_| line('k')).collect();
+        let batches = in_batches(input, 2);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 10);
+    }
+
+    /// A file with no keys starts straight in on the phrases, rather than
+    /// leading with an empty batch.
+    #[test]
+    fn phrases_alone_need_no_key_batch() {
+        let input: Vec<Input> = (0..5).map(|_| line('p')).collect();
+        let shapes: Vec<String> = in_batches(input, 2).iter().map(|b| kinds(b)).collect();
+        assert_eq!(shapes, ["pp", "pp", "p"]);
+    }
+
+    /// Every input reaches exactly one batch, and no phrase batch carries more
+    /// than it was allowed or a key that should have gone first.
+    #[test]
+    fn batching_loses_nothing() {
+        let input: Vec<Input> = (0..25)
+            .map(|i| line(if i % 3 == 0 { 'k' } else { 'p' }))
+            .collect();
+        let (keys, phrases) = (9, 16);
+
+        let batches = in_batches(input, 4);
+        let rejoined: String = batches.iter().map(|b| kinds(b)).collect();
+        assert_eq!(rejoined.matches('k').count(), keys);
+        assert_eq!(rejoined.matches('p').count(), phrases);
+
+        assert_eq!(kinds(&batches[0]), "k".repeat(keys));
+        for batch in &batches[1..] {
+            assert_eq!(kinds(batch), "p".repeat(batch.len()));
+            assert!(batch.len() <= 4);
+        }
     }
 
     /// Asking to expand and not to expand in the same breath is a mistake
