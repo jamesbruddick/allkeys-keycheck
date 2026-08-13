@@ -108,6 +108,8 @@ network request:
       scanning  keys.txt
          input  1 key · 1 phrase
 
+         batch  1 key
+
            key  0000000000000000000000000000000000000000000000000000000000000001
                 p2pkh-uncompressed 1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm
                 p2pkh-compressed   1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
@@ -115,10 +117,12 @@ network request:
                 p2wpkh             bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
                 p2tr               bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9
 
+         batch  1 phrase
+
        12-word  abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about
                 m/44'/0'/0'/0      20 addresses
-                  m/44'/0'/0'/0/0 p2pkh-uncompressed 18LhnLKXjcTw5xJFiTxntnKit2Gd63eWFm
-                  m/44'/0'/0'/0/2147483647 p2tr      bc1pegaldj4c9fcutx8q546p5f8yrw6xqxjfjw9qcdhea6stcgvt34tq2wgxw4
+                  m/44'/0'/0'/0/0          p2pkh-uncompressed 18LhnLKXjcTw5xJFiTxntnKit2Gd63eWFm
+                  m/44'/0'/0'/0/2147483647 p2tr               bc1pegaldj4c9fcutx8q546p5f8yrw6xqxjfjw9qcdhea6stcgvt34tq2wgxw4
                 m/44'/0'/0'/1      20 addresses
 ```
 

@@ -887,15 +887,22 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
 
         let groups = by_branch(&entry.addresses);
         let width = label_width(groups.iter().map(|(branch, _)| branch.len()));
-        // The sample rows carry a full path and an encoding, both longer than
-        // the branch they hang under, so they are measured among themselves.
-        let sample_width = label_width(
+
+        // The sample rows carry a path and an encoding, and the two are
+        // measured separately: an index runs from one digit to ten, so padding
+        // them as one string lines the addresses up while leaving the encodings
+        // between them ragged.
+        let samples = || {
             groups
                 .iter()
                 .flat_map(|(_, rows)| [rows.first(), rows.last()])
                 .flatten()
-                .map(|d| d.label().len()),
-        );
+        };
+        let path_width = samples()
+            .map(|d| d.path.as_deref().unwrap_or_default().len())
+            .max()
+            .unwrap_or(0);
+        let kind_width = label_width(samples().map(|d| d.kind.label().len()));
 
         for (branch, rows) in groups {
             ui.cont(&format!(
@@ -906,15 +913,16 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
             // The two ends of the branch: the first index scanned and the last,
             // which is the whole point of scanning a tail at all.
             for derived in [rows.first(), rows.last()].into_iter().flatten() {
+                let path = derived.path.as_deref().unwrap_or_default();
                 ui.detail(&format!(
-                    "{} {}",
-                    ui.dim(&format!("{:<sample_width$}", derived.label())),
+                    "{} {} {}",
+                    ui.dim(&format!("{path:<path_width$}")),
+                    ui.dim(&format!("{:<kind_width$}", derived.kind.label())),
                     ui.address(&derived.address)
                 ));
             }
         }
     }
-    println!();
 }
 
 /// How many lines one round of reading hands out. Stretching a phrase's seed
