@@ -22,17 +22,17 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// and let you retry deliberately rather than hold the keys in a loop forever.
 const MAX_ATTEMPTS: u32 = 8;
 
+/// The server's reply, read for its two counts and nothing else.
+///
+/// Both lists echo the keys back. They are deserialized as `IgnoredAny` so the
+/// hex is counted and discarded rather than parsed into owned `String`s that
+/// would then sit in memory, and could be printed, for the rest of the run.
 #[derive(Debug, Deserialize)]
 struct SubmitResponse {
     #[serde(default)]
-    new_finds: Vec<NewFind>,
+    new_finds: Vec<serde::de::IgnoredAny>,
     #[serde(default)]
-    already_found: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NewFind {
-    key_hex: String,
+    already_found: Vec<serde::de::IgnoredAny>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,7 +48,9 @@ struct ErrorBody {
 
 #[derive(Default)]
 pub struct Summary {
-    pub accepted: Vec<String>,
+    /// Keys the directory had never seen before.
+    pub accepted: usize,
+    /// Keys it already held.
     pub already_known: usize,
 }
 
@@ -63,9 +65,7 @@ pub fn submit(keys: &[String], token: &str, ui: &Ui) -> Result<Summary, String> 
     for (index, chunk) in batches.iter().enumerate() {
         ui.progress(index * MAX_KEYS_PER_REQUEST, keys.len(), "uploading");
         let response = send(&http, chunk, token, ui)?;
-        summary
-            .accepted
-            .extend(response.new_finds.into_iter().map(|f| f.key_hex));
+        summary.accepted += response.new_finds.len();
         summary.already_known += response.already_found.len();
     }
     ui.progress(keys.len(), keys.len(), "done");

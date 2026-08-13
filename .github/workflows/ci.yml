@@ -1,0 +1,70 @@
+name: CI
+
+# Everything that reaches main, and everything proposed for it. The release
+# workflow only fires on a version bump and goes straight to publishing signed
+# binaries, so this is the gate that stands between a broken commit and a
+# download — it has to run on the commits themselves, not on the release.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Superseded runs are cancelled: a push that lands on top of another one has
+# already answered the question the first was asking.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Formatting first: it is the cheapest to run and the cheapest to fix, so
+      # failing on it should not cost a full test run.
+      - run: cargo fmt --check
+
+      # --all-targets so the tests are linted too, and warnings are errors:
+      # a lint worth having is one that cannot be scrolled past.
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+      # --locked so a Cargo.lock that no longer matches the manifest fails here
+      # rather than in the release build, which uses --locked too.
+      - run: cargo test --locked
+
+  # The unix-only code paths — the 0600 output file and the 0600 config — have
+  # `#[cfg(not(unix))]` counterparts that nothing else ever compiles, and the
+  # release publishes a Windows binary. A check on the one platform the rest of
+  # this workflow cannot speak for keeps that branch from rotting until release
+  # day. `cargo check` rather than a test run: it is the compile that is at risk.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - run: cargo check --all-targets --locked

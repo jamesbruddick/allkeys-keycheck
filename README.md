@@ -70,7 +70,7 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.4.0
+  allkeys-keycheck 0.5.0
 
       scanning  keys.txt
          input  1 key · 1 duplicate collapsed · 1 bad line removed
@@ -103,7 +103,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.4.0
+  allkeys-keycheck 0.5.0
 
       scanning  keys.txt
          input  1 key · 1 phrase
@@ -350,6 +350,13 @@ can sit anywhere in the space:
 | `400000..500000` | one shard of a scan too big for a single pass |
 | `..` | the entire index space, all 2³¹ of it per chain |
 
+A window is derived before it is queried, and a phrase's addresses are held
+together, so a window's width is a memory cost as well as a time one. A hundred
+thousand indices is four million addresses per phrase — on the order of 2 GB.
+The lookups stay batched however wide the window gets, but `..` is a shape the
+grammar allows rather than a setting to run: shard a large scan into windows and
+take them one pass at a time, which is what `400000..500000` is for.
+
 Ends are absolute index numbers rather than offsets from the top, so every
 window reads on its own and no value starts with a `-` that the shell would take
 for a flag. An omitted start means 0; an omitted end means the end of the space.
@@ -422,7 +429,11 @@ Omitting `-o` means nothing is written to disk at all.
 
 Found keys are POSTed to `https://allkeys.directory/api/v1/found-keys` in
 batches of 250, authenticated with a bearer token. The run reports how many were
-accepted as new finds and how many were already on record.
+accepted as new finds and how many were already on record — as counts, never as
+a list of the keys. An upload is the one thing that puts a private key somewhere
+other than this machine, and echoing the same keys to the terminal on the way
+past would put them somewhere else again: a scrollback buffer, a piped log, a
+pasted terminal session. `-o` is where the keys themselves belong.
 
 **Uploading sends private keys off this machine and cannot be undone**, so it
 never happens on its own:
@@ -569,6 +580,17 @@ address, rather than writing an output file that quietly omits it.
   `0600` — readable only by you, since it is where your API keys go.
 - **Pass secrets through the environment, not the command line.** Anything on
   the command line is visible in your shell history and to other processes.
+- **The terminal output names the secrets that were found**, since a scan you
+  cannot read the results of is no use. A key still holding coins is printed in
+  full. That is the run's report, not its record: it goes to a scrollback buffer
+  with no permissions on it at all, so `allkeys-keycheck … | tee run.log` writes
+  those same keys into a `0644` file, next to the `0600` one `-o` just made.
+  Read the results on screen; keep them in the output file.
+- **Nothing in memory is wiped.** Seeds, derived keys and the passphrase live in
+  the process heap for the length of the run and are freed without being zeroed,
+  so a core dump or a swapped-out page can hold them afterwards. The threat
+  model here is a machine you already trust with the keys you are feeding it;
+  it is not a hostile local host.
 
 ## Licence
 

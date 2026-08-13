@@ -12,16 +12,16 @@
 //! walks forward from zero.
 
 use bip39::{Language, Mnemonic};
+use bitcoin::Network;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
-use bitcoin::hashes::{sha512, Hash, HashEngine, Hmac, HmacEngine};
+use bitcoin::hashes::{Hash, HashEngine, Hmac, HmacEngine, sha512};
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::{All, Scalar, SecretKey};
-use bitcoin::Network;
 use rayon::prelude::*;
 use std::ops::Range;
 use std::str::FromStr;
 
-use crate::keys::{hex_of, Derived, KeyEntry, PublicForms, Source, BARE_KEY_KINDS};
+use crate::keys::{BARE_KEY_KINDS, Derived, KeyEntry, PublicForms, Source, hex_of};
 
 /// Word counts BIP39 defines, for 128 through 256 bits of entropy.
 pub const WORD_COUNTS: [usize; 5] = [12, 15, 18, 21, 24];
@@ -292,19 +292,24 @@ impl Phrase {
         raw: &str,
         span: &Span,
     ) -> Result<KeyEntry, String> {
-        let addresses = self.walk(secp, span, span.addresses_per_mnemonic(), |prefix, index, key| {
-            let path = format!("{prefix}/{index}");
-            let secret_hex = hex_of(&key.secret_bytes());
-            // One public key for all five encodings: they are views of the same
-            // point, and computing that point is what a key costs.
-            let public = PublicForms::of(secp, key);
-            BARE_KEY_KINDS.map(|kind| Derived {
-                kind,
-                address: public.address(secp, kind),
-                secret_hex: secret_hex.clone(),
-                path: Some(path.clone()),
-            })
-        })?;
+        let addresses = self.walk(
+            secp,
+            span,
+            span.addresses_per_mnemonic(),
+            |prefix, index, key| {
+                let path = format!("{prefix}/{index}");
+                let secret_hex = hex_of(&key.secret_bytes());
+                // One public key for all five encodings: they are views of the same
+                // point, and computing that point is what a key costs.
+                let public = PublicForms::of(secp, key);
+                BARE_KEY_KINDS.map(|kind| Derived {
+                    kind,
+                    address: public.address(secp, kind),
+                    secret_hex: secret_hex.clone(),
+                    path: Some(path.clone()),
+                })
+            },
+        )?;
 
         Ok(KeyEntry {
             raw: raw.trim().to_string(),
@@ -375,7 +380,14 @@ impl Phrase {
             .par_iter()
             .with_min_len(per_branch_min)
             .map(|(prefix, branch)| {
-                Self::branch_walk(secp, prefix, branch, span, capacity / branch_count(), &per_key)
+                Self::branch_walk(
+                    secp,
+                    prefix,
+                    branch,
+                    span,
+                    capacity / branch_count(),
+                    &per_key,
+                )
             })
             .collect::<Result<Vec<_>, String>>()?;
 
@@ -456,9 +468,10 @@ fn child_key(branch: &Xpriv, parent: &[u8; 33], index: u32) -> Result<SecretKey,
     // a walk one level deep has no use for.
     branch
         .private_key
-        .add_tweak(&Scalar::from_be_bytes(tweak[..32].try_into().expect("32 bytes")).map_err(
-            |_| "derivation produced a tweak past the curve order".to_string(),
-        )?)
+        .add_tweak(
+            &Scalar::from_be_bytes(tweak[..32].try_into().expect("32 bytes"))
+                .map_err(|_| "derivation produced a tweak past the curve order".to_string())?,
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -494,9 +507,8 @@ mod tests {
 
     /// The BIP39 test-vector phrase, whose BIP44/49/84/86 addresses are
     /// published in the BIPs themselves.
-    const PHRASE: &str =
-        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon \
-         abandon about";
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon \
+                          abandon abandon abandon abandon about";
 
     /// A span from its written form, so the tests exercise the same parser the
     /// command line goes through.
@@ -566,9 +578,11 @@ mod tests {
             .filter(|d| d.path.as_deref() == Some(path))
             .collect();
         assert_eq!(at_path.len(), BARE_KEY_KINDS.len());
-        assert!(at_path
-            .iter()
-            .all(|d| d.secret_hex == at_path[0].secret_hex));
+        assert!(
+            at_path
+                .iter()
+                .all(|d| d.secret_hex == at_path[0].secret_hex)
+        );
 
         let distinct: HashSet<&str> = at_path.iter().map(|d| d.address.as_str()).collect();
         assert_eq!(distinct.len(), BARE_KEY_KINDS.len());

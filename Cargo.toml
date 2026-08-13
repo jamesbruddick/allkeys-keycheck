@@ -1,8 +1,25 @@
 [package]
 name = "allkeys-keycheck"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.87"
+description = "Find which Bitcoin private keys and BIP39 mnemonic phrases have active addresses"
+repository = "https://github.com/jamesbruddick/allkeys-keycheck"
+license = "MIT"
+readme = "README.md"
+keywords = ["bitcoin", "bip39", "bip32", "mnemonic", "wallet"]
+categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
+
+# A run is millions of secp256k1 multiplications and HMACs, and the binaries are
+# built once in CI and downloaded many times, so the build-time cost of whole-
+# program optimization is paid once and the throughput is had by everyone.
+#
+# `panic = "abort"` is deliberately absent: `Ui` gives the terminal its cursor
+# back from `Drop`, which an aborting panic would never run.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
 
 [dependencies]
 bip39 = "2.2.2"

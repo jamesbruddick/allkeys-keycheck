@@ -169,7 +169,15 @@ struct Args {
     ///
     /// Requests are additionally capped by body size, which is the limit the
     /// server actually enforces.
-    #[arg(long, default_value_t = 1500, value_name = "N")]
+    #[arg(
+        long,
+        default_value_t = 1500,
+        // `value_parser!(usize)` has no range of its own — the ranged parser is
+        // built over u64 and converted, which is what the macro does for the
+        // sizes below anyway.
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        value_name = "N"
+    )]
     api_batch: usize,
 
     /// How many phrases to carry through the run at a time
@@ -294,10 +302,7 @@ fn main() -> ExitCode {
 
 /// Read the config file and fill in everything the command line and the
 /// environment left at its default. Returns the file's path, if there was one.
-fn load_config(
-    args: &mut Args,
-    matches: &clap::ArgMatches,
-) -> Result<Option<PathBuf>, String> {
+fn load_config(args: &mut Args, matches: &clap::ArgMatches) -> Result<Option<PathBuf>, String> {
     // --init-config writes the file; reading one first would only turn a
     // typo in an existing config into a failure to create a new one.
     if args.init_config {
@@ -329,6 +334,21 @@ fn merge_config(
     matches: &clap::ArgMatches,
     config: config::Config,
 ) -> Result<(), String> {
+    // The pair the command line already refuses, caught again once the file is
+    // in play — whether both halves came out of it or one of each. Layering is
+    // what makes a contradiction easy to write here: `no-expand = true` set once
+    // and forgotten, then an `--expand` typed months later.
+    let expand_asked = !unset(matches, "expand") || config.expand.is_some();
+    let no_expand_asked = !unset(matches, "no_expand") || config.no_expand.unwrap_or(false);
+    if expand_asked && no_expand_asked {
+        return Err(
+            "expand and no-expand are both set: one asks for a phrase that hits \
+                    to be followed further, the other asks for it not to be. Remove \
+                    whichever was not meant"
+                .into(),
+        );
+    }
+
     if unset(matches, "input") {
         args.input = config.input;
     }
@@ -354,6 +374,11 @@ fn merge_config(
     }
     if unset(matches, "api_batch") {
         if let Some(batch) = config.api_batch {
+            if batch == 0 {
+                return Err("api-batch = 0 in the config file: a request carrying no \
+                            addresses would ask the API about nothing"
+                    .into());
+            }
             args.api_batch = batch;
         }
     }
@@ -394,6 +419,28 @@ fn merge_config(
     Ok(())
 }
 
+/// The token an upload will be authenticated with, or `None` when this run will
+/// not be uploading anything.
+///
+/// Resolved before the scan rather than after it, so a missing token costs
+/// nothing instead of surfacing once the lookup has already run.
+///
+/// `--dry-run` contacts no network and so never uploads, whatever else was
+/// asked for: it must not be held up by a token it will never spend. That
+/// matters because `upload = true` is a reasonable thing to leave in a config
+/// file, and a dry run is exactly what you reach for before a real one.
+fn upload_token(args: &Args) -> Result<Option<String>, String> {
+    match (args.upload && !args.dry_run, &args.allkeys_api_key) {
+        (true, Some(key)) => Ok(Some(key.clone())),
+        (true, None) => Err(format!(
+            "--upload needs an allkeys.directory API key: pass --allkeys-api-key, set \
+             ALLKEYS_API_KEY, or put allkeys-api-key = \"...\" under [secrets] in {}",
+            config::DEFAULT_FILE
+        )),
+        (false, _) => Ok(None),
+    }
+}
+
 fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     ui.title(env!("CARGO_PKG_VERSION"));
     ui.gap();
@@ -422,19 +469,7 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         ));
     }
 
-    // Checked before the scan rather than after it, so a missing token costs
-    // nothing instead of surfacing once the lookup has already run.
-    let upload_token = match (args.upload, &args.allkeys_api_key) {
-        (true, Some(key)) => Some(key.clone()),
-        (true, None) => {
-            return Err(format!(
-                "--upload needs an allkeys.directory API key: pass --allkeys-api-key, set \
-                 ALLKEYS_API_KEY, or put allkeys-api-key = \"...\" under [secrets] in {}",
-                config::DEFAULT_FILE
-            ));
-        }
-        (false, _) => None,
-    };
+    let upload_token = upload_token(args)?;
 
     let text = fs::read_to_string(input)
         .map_err(|e| format!("could not read {}: {e}", input.display()))?;
@@ -462,8 +497,11 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
             plural(phrases)
         ));
     }
-    // No empty case to cover: a file with nothing usable in it is refused by
-    // `parse_input` before there is a row to print.
+    // A file of nothing but blanks and comments has no fact to report, and the
+    // row still has to say something.
+    if facts.is_empty() && parsed.rejected.is_empty() {
+        facts.push("nothing to scan".to_string());
+    }
     if parsed.duplicates > 0 {
         facts.push(format!(
             "{} duplicate{} collapsed",
@@ -509,6 +547,14 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         queue.drain(&bad, ui)?;
     }
 
+    // After the rows above, not before them: a file with nothing usable in it is
+    // the one case where knowing *which* lines were unreadable matters most, and
+    // failing at the parse would report the count and name none of them. The bad
+    // lines leave the file first, for the same reason they always do.
+    if parsed.inputs.is_empty() {
+        return Err(format!("no keys or phrases in {}", input.display()));
+    }
+
     // One batch at a time, all the way through: a batch that finds something
     // has it on disk before the next one starts, and only one batch's worth of
     // addresses is ever held in memory.
@@ -520,7 +566,11 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
 
     let client = match args.dry_run {
         true => None,
-        false => Some(api::Client::new(args.delay, args.blockchain_api_key.clone(), ui)?),
+        false => Some(api::Client::new(
+            args.delay,
+            args.blockchain_api_key.clone(),
+            ui,
+        )?),
     };
     let mut found = 0;
     let mut numbering = 0;
@@ -620,7 +670,11 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
                 n => format!(
                     "{} {}",
                     input.display(),
-                    ui.dim(&format!("· {} line{} left", ui::commas(n as u64), plural(n)))
+                    ui.dim(&format!(
+                        "· {} line{} left",
+                        ui::commas(n as u64),
+                        plural(n)
+                    ))
                 ),
             },
         );
@@ -789,17 +843,18 @@ fn heading(batch: &[Input], numbering: &mut usize, numbered: usize, ui: &Ui) -> 
 
 /// Submit the found keys. Passing `--upload` is the confirmation; nothing is
 /// sent without it.
+///
+/// The keys are counted, never listed. An upload is the one thing that puts a
+/// private key somewhere other than this machine, and printing the same keys to
+/// stdout on the way past would put them somewhere else again — a scrollback
+/// buffer, a piped log file, a pasted terminal session. The counts say what
+/// happened; the output file is where the keys themselves belong.
 fn upload_keys(active: &[String], token: &str, ui: &Ui) -> Result<(), String> {
-    if active.is_empty() {
-        ui.row("upload", "nothing to send");
-        return Ok(());
-    }
-
     let summary = upload::submit(active, token, ui)?;
     let mut facts = vec![format!(
         "{} new find{} accepted",
-        ui::commas(summary.accepted.len() as u64),
-        plural(summary.accepted.len())
+        ui::commas(summary.accepted as u64),
+        plural(summary.accepted)
     )];
     if summary.already_known > 0 {
         facts.push(format!(
@@ -808,11 +863,6 @@ fn upload_keys(active: &[String], token: &str, ui: &Ui) -> Result<(), String> {
         ));
     }
     ui.row_good("uploaded", &facts.join(&ui.dim(" · ")));
-    // The keys themselves, echoed from the server's reply rather than from the
-    // request, so this lists what was actually credited.
-    for key in &summary.accepted {
-        ui.cont(key);
-    }
     Ok(())
 }
 
@@ -1118,9 +1168,8 @@ fn parse_input(text: &str, passphrase: &str, ui: &Ui) -> Result<Parsed, String> 
         },
     )?;
 
-    if inputs.is_empty() {
-        return Err("no valid private keys or phrases found in input".into());
-    }
+    // An input holding nothing usable is not an error here: the caller reports
+    // the rejected lines and drains them before deciding what to do about it.
     Ok(Parsed {
         inputs,
         duplicates,
@@ -1296,9 +1345,15 @@ fn expand(
     ui: &Ui,
 ) -> Result<(), String> {
     let batch = args.api_batch;
-    expand_with(entries, phrases, hits, start, args.expand, ui, |addresses| {
-        query(client, addresses, batch, "expanding", ui)
-    })
+    expand_with(
+        entries,
+        phrases,
+        hits,
+        start,
+        args.expand,
+        ui,
+        |addresses| query(client, addresses, batch, "expanding", ui),
+    )
 }
 
 /// The expansion itself, with the lookup left to the caller so the loop that
@@ -1479,54 +1534,69 @@ fn show_funded(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>, ui: &
     }
 }
 
-/// Write the output file and print the findings. Returns the 64-char hex of
-/// every secret that turned out to control a used address — the form the upload
-/// API expects, so a `0x` prefix or uppercase in the input file cannot reach the
-/// wire, and a mnemonic is represented by its hit child keys rather than by the
-/// phrase, which the API has no way to accept.
-/// What to record in the output file for the secrets that hit.
+/// What a batch's hits amount to: the lines to record, and the keys to send.
 ///
-/// A bare key is written back as it was typed. A mnemonic is written as both:
-/// the child keys that hit, so the file is a flat list of spendable 32-byte
-/// keys, and the phrase itself, which is what actually restores the wallet and
-/// what a scan of a wordlist is really looking for. One line per secret, so a
-/// key that hit under several encodings is not repeated.
+/// The two are built together because they are the same walk over the same
+/// addresses under the same de-duplication — a key that hit under several
+/// encodings is one secret, written once and sent once. Splitting them into two
+/// passes meant two copies of that rule, free to drift apart.
+#[derive(Default)]
+struct Findings {
+    /// The lines to merge into the output file, in the order they were found.
+    records: Vec<outfile::Record>,
+    /// 64-char lowercase hex of every secret behind an address that hit, in
+    /// first-seen order — the form the upload API expects, so a `0x` prefix or
+    /// uppercase in the input file cannot reach the wire.
+    keys: Vec<String>,
+}
+
+/// Work out what to write and what to send for the secrets that hit.
+///
+/// A bare key is *recorded* as it was typed, since the output file echoes the
+/// input's spelling, but *sent* as its normalized hex. A mnemonic is recorded as
+/// both the child keys that hit — so the file stays a flat list of spendable
+/// 32-byte keys — and the phrase itself, which is what actually restores the
+/// wallet and what a scan of a wordlist is really looking for. Only the children
+/// are sent: the phrase is not something the API can accept.
 ///
 /// The phrases are emitted after the keys they came from, but the file's own
 /// ordering is what decides where they end up: `outfile` sorts every key ahead
 /// of everything that is not one, so the phrases collect at the bottom.
-fn records(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>) -> Vec<outfile::Record> {
-    let mut records = Vec::new();
+fn findings(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>) -> Findings {
+    let mut found = Findings::default();
     let mut seen = HashSet::new();
     let mut phrases = Vec::new();
 
     for entry in active {
-        if matches!(entry.source, keys::Source::Hex) {
-            records.push(outfile::Record {
-                comments: Vec::new(),
-                line: entry.raw.clone(),
-            });
-            continue;
-        }
         for derived in &entry.addresses {
             if hits.contains_key(&derived.address) && seen.insert(derived.secret_hex.clone()) {
-                records.push(outfile::Record {
-                    comments: Vec::new(),
-                    line: derived.secret_hex.clone(),
-                });
+                found.keys.push(derived.secret_hex.clone());
+                if entry.is_phrase() {
+                    found.records.push(outfile::Record {
+                        comments: Vec::new(),
+                        line: derived.secret_hex.clone(),
+                    });
+                }
             }
         }
-        // The normalized phrase rather than the raw line: a respaced or
-        // miscased spelling of a phrase already on file is the same wallet, and
-        // the file should not grow a second copy of it.
-        phrases.push(outfile::Record {
-            comments: Vec::new(),
-            line: entry.display.clone(),
-        });
+
+        match entry.is_phrase() {
+            // The normalized phrase rather than the raw line: a respaced or
+            // miscased spelling of a phrase already on file is the same wallet,
+            // and the file should not grow a second copy of it.
+            true => phrases.push(outfile::Record {
+                comments: Vec::new(),
+                line: entry.display.clone(),
+            }),
+            false => found.records.push(outfile::Record {
+                comments: Vec::new(),
+                line: entry.raw.clone(),
+            }),
+        }
     }
 
-    records.extend(phrases);
-    records
+    found.records.extend(phrases);
+    found
 }
 
 fn write_results(
@@ -1540,6 +1610,8 @@ fn write_results(
         .filter(|e| e.addresses.iter().any(|d| hits.contains_key(&d.address)))
         .collect();
 
+    let found = findings(&active, hits);
+
     // Only when asked for: with --upload alone there is no reason to leave a
     // file of private keys on disk.
     let mut merged = None;
@@ -1547,7 +1619,7 @@ fn write_results(
         // Read before writing: the file is merged into, never replaced, so a
         // second run cannot throw away what the first one found.
         let existing = outfile::load(path)?;
-        let result = outfile::merge(existing, records(&active, hits));
+        let result = outfile::merge(existing, found.records);
         outfile::save(path, &result.records)?;
         merged = Some(result);
     }
@@ -1579,20 +1651,6 @@ fn write_results(
         show_funded(&active, hits, ui);
     }
 
-    // The secrets behind the addresses that actually hit — for a mnemonic that
-    // is the child key at the path, not the phrase, since the child is what the
-    // upload API takes and what spends the coins. De-duplicated in first-seen
-    // order: a bare key that hit on several encodings is still one key.
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in &active {
-        for derived in &entry.addresses {
-            if hits.contains_key(&derived.address) && seen.insert(derived.secret_hex.clone()) {
-                found.push(derived.secret_hex.clone());
-            }
-        }
-    }
-
     if let (Some(path), Some(merged)) = (&args.output, &merged) {
         // The file is cumulative, so its total is the headline and this run's
         // contribution is the detail — "3 new" against a file of 300 is a very
@@ -1616,7 +1674,7 @@ fn write_results(
             ),
         );
     }
-    Ok(found)
+    Ok(found.keys)
 }
 
 #[cfg(test)]
@@ -1626,8 +1684,8 @@ fn write_results(
 mod tests {
     use super::*;
 
-    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon \
-         abandon about";
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon \
+                          abandon abandon abandon abandon about";
 
     /// The shipped template is meant to be copied and run as it stands, so a
     /// bare command line against it has to produce a complete, valid run: an
@@ -1713,14 +1771,22 @@ mod tests {
             .map(|d| (d.address.clone(), used()))
             .collect();
 
-        expand_with(&mut entries, &phrases, &mut hits, start, step, &ui, |addresses| {
-            let found = addresses
-                .iter()
-                .filter(|a| used_addresses.contains_key(*a))
-                .map(|a| (a.clone(), used()))
-                .collect();
-            Ok((found, 1))
-        })
+        expand_with(
+            &mut entries,
+            &phrases,
+            &mut hits,
+            start,
+            step,
+            &ui,
+            |addresses| {
+                let found = addresses
+                    .iter()
+                    .filter(|a| used_addresses.contains_key(*a))
+                    .map(|a| (a.clone(), used()))
+                    .collect();
+                Ok((found, 1))
+            },
+        )
         .expect("expansion of a valid phrase cannot fail");
 
         let mut indices: Vec<u32> = entries[0]
@@ -1763,14 +1829,18 @@ mod tests {
             .map(|a| (a.to_string(), used()))
             .collect();
 
-        let records = records(&[&first, &second], &hits);
-        let lines: Vec<&str> = records.iter().map(|r| r.line.as_str()).collect();
+        let found = findings(&[&first, &second], &hits);
+        let lines: Vec<&str> = found.records.iter().map(|r| r.line.as_str()).collect();
         assert_eq!(lines, [key.as_str(), other.as_str(), PHRASE, "zoo zoo zoo"]);
+
+        // The same walk decides what is uploaded: a phrase is represented by
+        // its hit children, never by the phrase, which the API cannot take.
+        assert_eq!(found.keys, [key.as_str(), other.as_str()]);
 
         // And through the file's own ordering, which is what actually decides:
         // both keys first ascending, then the phrases by length — the short
         // one ahead of the 12-word one despite sorting after it alphabetically.
-        let merged = outfile::merge(Vec::new(), records);
+        let merged = outfile::merge(Vec::new(), found.records);
         assert_eq!(
             outfile::render(&merged.records),
             format!("{key}\n{other}\nzoo zoo zoo\n{PHRASE}\n")
@@ -1830,16 +1900,57 @@ mod tests {
         assert!(args.indices.count().filter(|_| !args.no_expand).is_none());
     }
 
+    /// Layer a config file under a command line, the way `main` does.
+    fn merged(argv: &[&str], config: &str) -> Result<Args, String> {
+        let matches = Args::command().get_matches_from(argv);
+        let mut args = Args::from_arg_matches(&matches).expect("argv parses");
+        merge_config(
+            &mut args,
+            &matches,
+            toml::from_str(config).expect("config parses"),
+        )?;
+        Ok(args)
+    }
+
     /// A batch of no phrases would never get through the input. Refused from
     /// either direction, like a step of zero.
     #[test]
     fn a_phrase_batch_of_zero_is_refused() {
         assert!(Args::try_parse_from(["allkeys-keycheck", "--phrase-batch", "0"]).is_err());
+        assert!(merged(&["allkeys-keycheck"], "phrase-batch = 0\n").is_err());
+    }
 
-        let matches = Args::command().get_matches_from(["allkeys-keycheck"]);
-        let mut args = Args::from_arg_matches(&matches).unwrap();
-        let config = toml::from_str("phrase-batch = 0\n").unwrap();
-        assert!(merge_config(&mut args, &matches, config).is_err());
+    /// A request carrying no addresses asks the API about nothing, and a scan
+    /// made of them would never finish. Refused from either direction, like the
+    /// other two sizes — this one used to be silently rescued to a batch of one,
+    /// turning a 40,000-address pass into 40,000 requests.
+    #[test]
+    fn an_api_batch_of_zero_is_refused() {
+        assert!(Args::try_parse_from(["allkeys-keycheck", "--api-batch", "0"]).is_err());
+        assert!(merged(&["allkeys-keycheck"], "api-batch = 0\n").is_err());
+    }
+
+    /// A dry run contacts no network and so never uploads. It must not be held
+    /// up by a token it will never spend — `upload = true` is an ordinary thing
+    /// to leave in a config file, and a dry run is what you reach for before a
+    /// real one.
+    #[test]
+    fn a_dry_run_needs_no_upload_token() {
+        let args = merged(&["allkeys-keycheck", "--dry-run"], "upload = true\n").unwrap();
+        assert!(args.upload && args.dry_run);
+        assert_eq!(upload_token(&args).unwrap(), None);
+
+        // Without --dry-run the same config is refused, before any scan runs.
+        let args = merged(&["allkeys-keycheck"], "upload = true\n").unwrap();
+        assert!(upload_token(&args).is_err());
+
+        // And a real upload still carries the token it was given.
+        let args = merged(
+            &["allkeys-keycheck", "-u", "--allkeys-api-key", "ak_test"],
+            "",
+        )
+        .unwrap();
+        assert_eq!(upload_token(&args).unwrap().as_deref(), Some("ak_test"));
     }
 
     /// The two batch sizes are different things — addresses per request and
@@ -1863,11 +1974,7 @@ mod tests {
     #[test]
     fn a_step_of_zero_is_refused() {
         assert!(Args::try_parse_from(["allkeys-keycheck", "--expand", "0"]).is_err());
-
-        let matches = Args::command().get_matches_from(["allkeys-keycheck"]);
-        let mut args = Args::from_arg_matches(&matches).unwrap();
-        let config = toml::from_str("expand = 0\n").unwrap();
-        assert!(merge_config(&mut args, &matches, config).is_err());
+        assert!(merged(&["allkeys-keycheck"], "expand = 0\n").is_err());
     }
 
     /// A line of the given kind — 'p' for a phrase, anything else a key —
@@ -1878,7 +1985,11 @@ mod tests {
             _ => "0".repeat(64),
         };
         let parsed = parse_input(&raw, "", &Ui::new(true)).expect("a valid line parses");
-        parsed.inputs.into_iter().next().expect("one line, one input")
+        parsed
+            .inputs
+            .into_iter()
+            .next()
+            .expect("one line, one input")
     }
 
     fn kinds(batch: &[Input]) -> String {
@@ -1943,11 +2054,35 @@ mod tests {
     }
 
     /// Asking to expand and not to expand in the same breath is a mistake
-    /// worth naming, rather than one of the two silently winning.
+    /// worth naming, rather than one of the two silently winning — from
+    /// whichever layer each half arrives on. Layering is what makes the
+    /// contradiction easy to write: `no-expand = true` set once and forgotten,
+    /// then an `--expand` typed months later.
     #[test]
     fn expand_and_no_expand_together_are_refused() {
         assert!(
             Args::try_parse_from(["allkeys-keycheck", "--expand", "800", "--no-expand"]).is_err()
         );
+        // Both halves in the file.
+        assert!(merged(&["allkeys-keycheck"], "expand = 800\nno-expand = true\n").is_err());
+        // One of each, in either arrangement.
+        assert!(merged(&["allkeys-keycheck", "--no-expand"], "expand = 800\n").is_err());
+        assert!(
+            merged(
+                &["allkeys-keycheck", "--expand", "800"],
+                "no-expand = true\n"
+            )
+            .is_err()
+        );
+
+        // `no-expand = false` is not a request for anything, so it does not
+        // contradict an --expand: only a file that turns it on can.
+        let args = merged(
+            &["allkeys-keycheck", "--expand", "800"],
+            "no-expand = false\n",
+        )
+        .unwrap();
+        assert_eq!(args.expand, 800);
+        assert!(!args.no_expand);
     }
 }
