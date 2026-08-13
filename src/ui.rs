@@ -192,11 +192,9 @@ impl Ui {
             return;
         }
         const WIDTH: usize = 24;
-        let filled = if total == 0 {
-            WIDTH
-        } else {
-            done * WIDTH / total
-        };
+        // Nothing to get through is nothing to wait for, so an empty total
+        // reads as a full bar rather than as a division by zero.
+        let filled = (done * WIDTH).checked_div(total).unwrap_or(WIDTH);
         // The track is dim rather than brand: only the filled part is the
         // figure worth reading, and colouring both makes the bar look full at a
         // glance whatever it says.
