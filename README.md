@@ -48,7 +48,7 @@ was built by this repository's workflow and not by someone else:
 gh attestation verify allkeys-keycheck-macos-arm64.zip --repo jamesbruddick/allkeys-keycheck
 ```
 
-Or build from source, which needs Rust 1.87 or newer:
+Or build from source, which needs Rust 1.88 or newer:
 
 ```sh
 cargo build --release
@@ -70,7 +70,7 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.5.0
+  allkeys-keycheck 0.5.1
 
       scanning  keys.txt
          input  1 key · 1 duplicate collapsed · 1 bad line removed
@@ -103,7 +103,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.5.0
+  allkeys-keycheck 0.5.1
 
       scanning  keys.txt
          input  1 key · 1 phrase

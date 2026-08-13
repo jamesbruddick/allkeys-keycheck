@@ -1,8 +1,8 @@
 [package]
 name = "allkeys-keycheck"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "Find which Bitcoin private keys and BIP39 mnemonic phrases have active addresses"
 repository = "https://github.com/jamesbruddick/allkeys-keycheck"
 license = "MIT"

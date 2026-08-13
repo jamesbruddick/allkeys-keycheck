@@ -355,47 +355,47 @@ fn merge_config(
     if unset(matches, "output") {
         args.output = config.output;
     }
-    if unset(matches, "indices") {
-        if let Some(indices) = config.indices {
-            args.indices = indices
-                .parse()
-                .map_err(|e| format!("indices = \"{indices}\" in the config file: {e}"))?;
-        }
+    if unset(matches, "indices")
+        && let Some(indices) = config.indices
+    {
+        args.indices = indices
+            .parse()
+            .map_err(|e| format!("indices = \"{indices}\" in the config file: {e}"))?;
     }
-    if unset(matches, "expand") {
-        if let Some(expand) = config.expand {
-            if expand == 0 {
-                return Err("expand = 0 in the config file: a round of no indices \
-                            would scan nothing and never finish"
-                    .into());
-            }
-            args.expand = expand;
+    if unset(matches, "expand")
+        && let Some(expand) = config.expand
+    {
+        if expand == 0 {
+            return Err("expand = 0 in the config file: a round of no indices \
+                        would scan nothing and never finish"
+                .into());
         }
+        args.expand = expand;
     }
-    if unset(matches, "api_batch") {
-        if let Some(batch) = config.api_batch {
-            if batch == 0 {
-                return Err("api-batch = 0 in the config file: a request carrying no \
-                            addresses would ask the API about nothing"
-                    .into());
-            }
-            args.api_batch = batch;
+    if unset(matches, "api_batch")
+        && let Some(batch) = config.api_batch
+    {
+        if batch == 0 {
+            return Err("api-batch = 0 in the config file: a request carrying no \
+                        addresses would ask the API about nothing"
+                .into());
         }
+        args.api_batch = batch;
     }
-    if unset(matches, "phrase_batch") {
-        if let Some(batch) = config.phrase_batch {
-            if batch == 0 {
-                return Err("phrase-batch = 0 in the config file: a batch of no \
-                            phrases would never get through the input"
-                    .into());
-            }
-            args.phrase_batch = batch;
+    if unset(matches, "phrase_batch")
+        && let Some(batch) = config.phrase_batch
+    {
+        if batch == 0 {
+            return Err("phrase-batch = 0 in the config file: a batch of no \
+                        phrases would never get through the input"
+                .into());
         }
+        args.phrase_batch = batch;
     }
-    if unset(matches, "delay") {
-        if let Some(delay) = config.delay {
-            args.delay = delay;
-        }
+    if unset(matches, "delay")
+        && let Some(delay) = config.delay
+    {
+        args.delay = delay;
     }
     // A flag is either passed or not, so the file can only ever turn one on —
     // `upload = false` in the file cannot undo a `-u` on the command line.
@@ -404,10 +404,10 @@ fn merge_config(
     args.no_expand |= unset(matches, "no_expand") && config.no_expand.unwrap_or(false);
     args.no_color |= unset(matches, "no_color") && config.no_color.unwrap_or(false);
 
-    if unset(matches, "passphrase") {
-        if let Some(passphrase) = config.secrets.passphrase {
-            args.passphrase = passphrase;
-        }
+    if unset(matches, "passphrase")
+        && let Some(passphrase) = config.secrets.passphrase
+    {
+        args.passphrase = passphrase;
     }
     if unset(matches, "blockchain_api_key") {
         args.blockchain_api_key = config.secrets.blockchain_api_key;
@@ -1300,15 +1300,15 @@ impl Growing {
     /// Which ends still have somewhere to go, with the window each would scan.
     fn next_windows(&self) -> Vec<(hd::End, std::ops::Range<u32>)> {
         let mut windows = Vec::new();
-        if self.near_open {
-            if let Some(w) = hd::next_window(hd::End::Near, self.near, self.far, self.step) {
-                windows.push((hd::End::Near, w));
-            }
+        if self.near_open
+            && let Some(w) = hd::next_window(hd::End::Near, self.near, self.far, self.step)
+        {
+            windows.push((hd::End::Near, w));
         }
-        if self.far_open {
-            if let Some(w) = hd::next_window(hd::End::Far, self.far, self.near, self.step) {
-                windows.push((hd::End::Far, w));
-            }
+        if self.far_open
+            && let Some(w) = hd::next_window(hd::End::Far, self.far, self.near, self.step)
+        {
+            windows.push((hd::End::Far, w));
         }
         windows
     }

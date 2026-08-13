@@ -48,6 +48,36 @@ jobs:
       # rather than in the release build, which uses --locked too.
       - run: cargo test --locked
 
+  # `rust-version` is a promise to anyone building from source, and the README
+  # repeats it. Nothing else in this workflow runs on anything but stable, so
+  # without this the promise is only ever an assertion — the code drifts forward
+  # onto whatever the toolchain of the day allows, and the first person to find
+  # out is someone whose build fails. The version is read out of the manifest
+  # rather than written here, so there is one place to change it.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      # `check`, not `test`: what the floor has to prove is that the code and
+      # the locked dependencies still compile on it, not that they behave
+      # differently there.
+      - run: cargo check --all-targets --locked
+
   # The unix-only code paths — the 0600 output file and the 0600 config — have
   # `#[cfg(not(unix))]` counterparts that nothing else ever compiles, and the
   # release publishes a Windows binary. A check on the one platform the rest of
