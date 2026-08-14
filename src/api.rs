@@ -231,8 +231,9 @@ impl<'a> Client<'a> {
                             &format!("short response for {}", addresses.len()),
                             SPLIT_NOTICE_WINDOW,
                             &format!(
-                                "incomplete response for {} addresses, splitting batch",
-                                addresses.len()
+                                "the API answered for only part of a batch of {} addresses \
+                                 — halving it and asking again",
+                                crate::ui::commas(addresses.len() as u64)
                             ),
                         );
                         self.collect_into(left, found)?;
@@ -242,13 +243,16 @@ impl<'a> Client<'a> {
                     short_attempts += 1;
                     if short_attempts >= MAX_SINGLE_ATTEMPTS {
                         return Err(format!(
-                            "address {} was never returned by the API after {} attempts; \
-                             refusing to report it as unused",
+                            "the API never returned address {} after {} attempts, and \
+                             reporting it as unused could be wrong. The input file was \
+                             left as it was, so the run can be repeated.",
                             addresses[0], MAX_SINGLE_ATTEMPTS
                         ));
                     }
-                    self.ui
-                        .warn(&format!("no data for {}, retrying", addresses[0]));
+                    self.ui.warn(&format!(
+                        "the API returned nothing for {} — asking again",
+                        addresses[0]
+                    ));
                 }
                 // Keyed on the error rather than on the batch: when the
                 // endpoint goes down every request in flight fails with the
@@ -259,7 +263,7 @@ impl<'a> Client<'a> {
                 Err(e) => self.ui.warn_throttled(
                     &e,
                     backoff,
-                    &format!("{e} — retrying in {}s", backoff.as_secs()),
+                    &format!("lookup {e} — retrying in {}s", backoff.as_secs()),
                 ),
             }
 

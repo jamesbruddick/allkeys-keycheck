@@ -48,7 +48,7 @@ const PHRASES_PER_BATCH: u64 = 100;
 /// invocation, not the prose.
 const EXAMPLES: &str = "\
 Examples:
-  allkeys-keycheck keys.txt -o found.txt   scan, save what has activity
+  allkeys-keycheck keys.txt -o active.txt  scan, save what has activity
   allkeys-keycheck keys.txt -u             scan, submit to allkeys.directory
   allkeys-keycheck keys.txt --dry-run      derive addresses, contact no network
   allkeys-keycheck --init-config           write a commented allkeys-keycheck.toml
@@ -56,7 +56,9 @@ Examples:
 Every option here can be set in allkeys-keycheck.toml instead, so a configured
 folder scans with a bare `allkeys-keycheck`. Flags win over the file.
 
-Results need somewhere to go: pass -o, -u, or both, unless --dry-run.";
+Results need somewhere to go: pass -o, -u, or both, unless --dry-run. Findings
+also accumulate in found.txt, which the input is filtered against, so nothing is
+ever scanned twice.";
 
 #[derive(Parser)]
 // `version` so a downloaded binary can say what it is: the run banner prints
@@ -86,10 +88,9 @@ struct Args {
     /// Each line is a hex private key or a BIP39 phrase of 12, 15, 18, 21 or 24
     /// words. Blank lines and `#` comments are skipped.
     ///
-    /// The file is a queue: bad lines are removed before the scan starts, and
-    /// each batch's lines leave as that batch finishes, so an interrupted run
-    /// resumes where it stopped. Comments and blanks stay. `--dry-run` leaves
-    /// the file alone entirely.
+    /// The file is a queue: each batch's lines leave as that batch finishes, so
+    /// an interrupted run resumes where it stopped. `--dry-run` leaves the file
+    /// alone entirely. Keep a copy of anything you want to scan twice.
     ///
     /// Optional here if `input` is set in allkeys-keycheck.toml.
     #[arg(value_name = "FILE")]
@@ -103,11 +104,11 @@ struct Args {
     /// to 2^31-1 and a wallet parked at the top of it is invisible to a scan
     /// that only walks forward from zero.
     ///
-    /// A count is a starting point — an end that turns up activity is followed
-    /// four hundred indices at a time until a round comes back empty. Give
-    /// explicit windows instead to scan exactly what you name and nothing more:
-    /// `10..110`, or `400000..500000` for one shard of a larger scan. An
-    /// omitted start means 0, an omitted end means the end of the space.
+    /// A count is a starting point: an end that turns up activity is followed
+    /// further out — see --expand. Explicit windows scan exactly what you name
+    /// and nothing more: `10..110`, or `400000..500000` for one shard of a
+    /// larger scan. An omitted start means 0, an omitted end the end of the
+    /// space.
     // A plain placeholder, with the two forms named in the line above instead:
     // spelling the grammar out here made this the widest option in the list,
     // and the widest option sets the description column for every other one.
@@ -135,21 +136,32 @@ struct Args {
     /// phrase itself. An existing file is merged into, never replaced, so runs
     /// accumulate and a repeat cannot lose what an earlier one found.
     ///
-    /// Omit it to write nothing to disk — useful alongside --upload. It can be
-    /// set in allkeys-keycheck.toml instead.
+    /// Omit it to keep no file of your own, which then needs --upload. Either
+    /// way the ledger is written. Can be set in allkeys-keycheck.toml instead.
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
+
+    /// The ledger of everything ever found, and the input's skip-list
+    ///
+    /// Holds what --output holds, in the same form, but is written on every
+    /// run: it is this machine's record of what is already known to be active,
+    /// so it has to be complete.
+    ///
+    /// It is read before every scan too. A key or phrase already in here has
+    /// been answered, so it leaves the input rather than being looked up a
+    /// second time.
+    #[arg(long, default_value = "found.txt", value_name = "FILE")]
+    found: PathBuf,
 
     /// How far each expansion round reaches in indices, or false to not expand
     ///
     /// A phrase that turns something up is followed past the count it was
-    /// scanned at, out to the next multiple of this each round, until a round
-    /// comes back empty. Raise it to reach further per request on a phrase you
-    /// expect to be busy; lower it to stop sooner after the activity ends.
+    /// scanned at, this far each round, until a round comes back empty. Raise
+    /// it to reach further per request on a phrase you expect to be busy; lower
+    /// it to stop sooner after the activity ends.
     ///
-    /// `--expand false` turns that off, so a count behaves like the windows it
-    /// names and nothing more — a fixed-cost pass over a large wordlist, where
-    /// a phrase that hits would otherwise keep the run going.
+    /// `--expand false` turns that off, making a count a fixed-cost pass over a
+    /// large wordlist that one busy phrase cannot prolong.
     ///
     /// Applies to a count --indices only. Explicit windows never expand.
     #[arg(long, default_value_t, value_name = "N|false")]
@@ -158,14 +170,12 @@ struct Args {
     /// Maximum addresses per API request
     ///
     /// The default is also the maximum: 1,500 addresses is as much as fits in
-    /// the 64 KiB body the server accepts. A larger batch is not refused by the
-    /// API, it is silently truncated to nothing — HTTP 200 with an empty
-    /// object, which reads exactly like a batch where no address was ever used
-    /// — so there is nothing above this to raise it to.
+    /// the 64 KiB body the server accepts. A larger batch is not refused, it is
+    /// silently answered as empty, so there is nothing above this to raise it
+    /// to.
     ///
     /// Requests are additionally capped by body size, since bech32 addresses
-    /// are nearly twice the length of base58 ones and a count alone cannot tell
-    /// which of the two a batch holds.
+    /// are nearly twice the length of base58 ones.
     #[arg(
         long,
         default_value_t = api::MAX_API_BATCH,
@@ -181,9 +191,8 @@ struct Args {
     /// How many API requests to keep in flight at once
     ///
     /// A lookup is almost entirely waiting on the network, so several at a time
-    /// is most of what makes a large scan finish: eight requests together move
-    /// roughly five times the addresses one at a time does, over the same
-    /// endpoint and with the same coverage.
+    /// is most of what makes a large scan finish: eight together move roughly
+    /// five times the addresses one at a time does.
     ///
     /// Lower it to be gentler on blockchain.info, or if a flaky connection is
     /// happier with one request at a time. It changes only how fast a scan
@@ -200,9 +209,8 @@ struct Args {
     /// How many phrases to carry through the run at a time
     ///
     /// Each batch is derived, queried, expanded and written before the next one
-    /// starts, so findings reach the output file as they are made and only one
-    /// batch of addresses is held in memory. Bare keys are not counted towards
-    /// it: five addresses each is not what makes a run large.
+    /// starts, so findings land as they are made and only one batch of
+    /// addresses is held in memory. Bare keys are not counted towards it.
     ///
     /// Lower it to see results sooner on a slow scan; raise it to spend fewer,
     /// fuller requests on a fast one.
@@ -256,9 +264,8 @@ struct Args {
 
     /// Write a commented allkeys-keycheck.toml and exit
     ///
-    /// Every setting, explained and commented out. Created readable only by
-    /// you, since it is where your API keys go. An existing file is never
-    /// overwritten.
+    /// Every setting, explained. Created readable only by you, since it is
+    /// where your API keys go. An existing file is never overwritten.
     #[arg(long)]
     init_config: bool,
 
@@ -350,6 +357,11 @@ fn merge_config(
     }
     if unset(matches, "output") {
         args.output = config.output;
+    }
+    if unset(matches, "found")
+        && let Some(found) = config.found
+    {
+        args.found = found;
     }
     if unset(matches, "indices")
         && let Some(indices) = config.indices
@@ -473,16 +485,23 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
             config::DEFAULT_FILE
         )
     })?;
-    ui.row("scanning", &input.display().to_string());
-
-    // The path only, never a value — this output gets pasted into bug reports.
+    // The config first, because it is what everything under it was decided by:
+    // a run that reads unexpectedly is most often reading a file the person who
+    // started it forgot was there. The path only, never a value — this output
+    // gets pasted into bug reports.
     if let Some(path) = config_file {
         ui.row("config", &path.display().to_string());
     }
+    ui.row("scanning", &input.display().to_string());
 
     // A scan whose results go nowhere is almost always a mistake, so it is
     // refused up front. --dry-run is exempt: it runs no scan, and already says
     // where its output goes.
+    //
+    // The ledger does not settle this. It is the run's memory — what stops the
+    // same secret being looked up twice — not a destination anyone chose, and a
+    // run that only fed it would still be one whose results the person who
+    // started it never asked to keep.
     if !args.dry_run && args.output.is_none() && !args.upload {
         return Err(format!(
             "results need somewhere to go: pass -o <file> to save them, --upload to submit \
@@ -493,10 +512,21 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
 
     let upload_token = upload_token(args)?;
 
+    // Read before the input is, because it decides what the input is worth:
+    // what is on file here will not be looked up again.
+    let ledger = outfile::identities(&outfile::load(&args.found)?);
+
     let text = fs::read_to_string(input)
         .map_err(|e| format!("could not read {}: {e}", input.display()))?;
 
     let mut parsed = parse_input(&text, &args.passphrase, ui)?;
+
+    // Filtered before the counts below, so the run reports the scan it is
+    // actually about to do rather than the one the file asked for. The lines it
+    // takes out go with the bad ones further down.
+    let known = drop_known(&mut parsed.inputs, &ledger);
+    let already = known.secrets;
+
     let count = parsed.inputs.len();
 
     // Related figures share one line, separated by a middot, so the run reads
@@ -521,7 +551,7 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     }
     // A file of nothing but blanks and comments has no fact to report, and the
     // row still has to say something.
-    if facts.is_empty() && parsed.rejected.is_empty() {
+    if facts.is_empty() && parsed.rejected.is_empty() && already == 0 {
         facts.push("nothing to scan".to_string());
     }
     if parsed.duplicates > 0 {
@@ -534,6 +564,18 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
             // straight away, which is a different thing to have been told.
             match args.dry_run {
                 true => "collapsed",
+                false => "removed",
+            }
+        ));
+    }
+    if already > 0 {
+        facts.push(format!(
+            "{} already found {}",
+            ui::commas(already as u64),
+            // --dry-run reports what a real run would do without doing it, and
+            // taking the lines out is doing it.
+            match args.dry_run {
+                true => "skipped",
                 false => "removed",
             }
         ));
@@ -568,11 +610,17 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
 
     let mut queue = Queue::new(input, &text);
 
-    // Before the scan rather than after it, for the two kinds of line that will
-    // never be scanned in their own right: one that named no secret at all, and
-    // one that repeated a secret an earlier line already named. Leaving either
-    // in the queue would mean every run from here on reading it, reporting it
-    // and stepping over it again.
+    // Before the scan rather than after it, for the three kinds of line that
+    // will never be scanned in their own right: one that named no secret at
+    // all, one that repeated a secret an earlier line already named, and one
+    // naming a secret the ledger already holds. Leaving any of them in the
+    // queue would mean every run from here on reading it, reporting it and
+    // stepping over it again.
+    //
+    // A line already on file can go this early for the same reason a bad one
+    // can: the rule that nothing leaves the input until it is safely somewhere
+    // else is already satisfied for it — being somewhere else is exactly what
+    // took it out.
     //
     // A repeat can go this early without weakening the rule that nothing leaves
     // the file until it is safely somewhere else, because that rule is about
@@ -585,6 +633,7 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     // the second would be re-reading what the first had just put there.
     if !args.dry_run {
         let mut spent: Vec<usize> = parsed.rejected.iter().map(|line| line.number).collect();
+        spent.extend(&known.lines);
         spent.extend(
             parsed
                 .inputs
@@ -606,7 +655,21 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     // failing at the parse would report the count and name none of them. The bad
     // lines leave the file first, for the same reason they always do.
     if parsed.inputs.is_empty() {
-        return Err(format!("no keys or phrases in {}", input.display()));
+        // Nothing to scan because it has all been scanned before is a finished
+        // run, not a failure: the input held real secrets, and the answer for
+        // every one of them was already on file.
+        if already > 0 {
+            ui.row(
+                "done",
+                &format!("everything left was already in {}", args.found.display()),
+            );
+            println!();
+            return Ok(());
+        }
+        return Err(format!(
+            "no keys or phrases in {}: every line was blank, a comment, or unreadable",
+            input.display()
+        ));
     }
 
     // One batch at a time, all the way through: a batch that finds something
@@ -784,7 +847,8 @@ impl Queue {
             .map_err(|e| format!("could not re-read {}: {e}", self.path.display()))?;
         if current != self.on_disk {
             ui.warn(&format!(
-                "{} changed during the run; leaving the rest of it alone",
+                "{} was changed by something else — leaving it alone for the rest of \
+                 the run; lines already scanned will be scanned again next time",
                 self.path.display()
             ));
             self.draining = false;
@@ -1240,6 +1304,45 @@ fn parse_input(text: &str, passphrase: &str, ui: &Ui) -> Result<Parsed, String> 
     })
 }
 
+/// What the ledger took out of an input, for the caller to report and to drain.
+struct Known {
+    /// Every line in the file those secrets were written on, repeats included.
+    lines: Vec<usize>,
+    /// How many distinct secrets that was.
+    secrets: usize,
+}
+
+/// Drop every secret the ledger already holds.
+///
+/// A secret on file has been answered: it is active, it is recorded, and
+/// deriving it again would spend the run's requests confirming what is already
+/// known. So it leaves the scan here, and the lines that named it leave the
+/// input file — which is what stops the same wordlist slice from being rescanned
+/// on every run from now on.
+///
+/// Matched on the *raw* line, through the same identity the file dedupes itself
+/// by, so a phrase respaced or a key written `0x…` is still recognized as the
+/// one on file.
+fn drop_known(inputs: &mut Vec<Input>, ledger: &HashSet<String>) -> Known {
+    let mut known = Known {
+        lines: Vec::new(),
+        secrets: 0,
+    };
+    if ledger.is_empty() {
+        return known;
+    }
+
+    inputs.retain(|input| {
+        if !ledger.contains(&outfile::identity(&input.raw)) {
+            return true;
+        }
+        known.lines.extend(input.lines());
+        known.secrets += 1;
+        false
+    });
+    known
+}
+
 /// Derive every address the scan will ask about, keeping the phrases behind
 /// them so one that shows activity can be followed further without re-parsing
 /// or re-stretching its seed.
@@ -1512,7 +1615,12 @@ type FundedKey<'a> = (&'a KeyEntry, Vec<FundedAddress<'a>>);
 
 /// Everything else is a count; a key still holding coins is the one result
 /// worth spelling out, so those get the key, the address and the amount.
-fn show_funded(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>, ui: &Ui) {
+///
+/// `history` is the line naming how many addresses were used, which this prints
+/// rather than the caller: when nothing is still funded, "no remaining balance"
+/// is the rest of that sentence rather than a finding of its own, and the two
+/// belong on one line.
+fn show_funded(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>, history: &str, ui: &Ui) {
     // Grouped by key, so a key funded on several address types prints its hex
     // once rather than once per address.
     let funded: Vec<FundedKey> = active
@@ -1532,9 +1640,11 @@ fn show_funded(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>, ui: &
         .collect();
 
     if funded.is_empty() {
-        ui.cont("no remaining balance — every address found is already spent");
+        ui.cont(&format!("{history}{}", ui.dim(" · no balances")));
         return;
     }
+
+    ui.cont(history);
 
     let total: u64 = funded
         .iter()
@@ -1645,16 +1755,25 @@ fn write_results(
 
     let found = findings(&active, hits);
 
-    // Only when asked for: with --upload alone there is no reason to leave a
-    // file of private keys on disk.
-    let mut merged = None;
-    if let Some(path) = &args.output {
+    // The ledger first, and the output file after it when that is a different
+    // file: the ledger is what the next run's input is filtered against, so it
+    // is the one that must not miss a batch. An output file that names the same
+    // path is one destination, not two — it has already been written.
+    let mut destinations: Vec<&Path> = vec![&args.found];
+    if let Some(output) = args.output.as_deref()
+        && output != args.found
+    {
+        destinations.push(output);
+    }
+
+    let mut written = Vec::new();
+    for path in destinations {
         // Read before writing: the file is merged into, never replaced, so a
         // second run cannot throw away what the first one found.
         let existing = outfile::load(path)?;
-        let result = outfile::merge(existing, found.records);
+        let result = outfile::merge(existing, found.records.clone());
         outfile::save(path, &result.records)?;
-        merged = Some(result);
+        written.push((path, result));
     }
 
     if active.is_empty() {
@@ -1676,15 +1795,21 @@ fn write_results(
                 noun(entries, entries.len())
             ),
         );
-        ui.cont(&format!(
+        let history = format!(
             "{} address{} with history",
             ui::commas(hits.len() as u64),
             if hits.len() == 1 { "" } else { "es" }
-        ));
-        show_funded(&active, hits, ui);
+        );
+        show_funded(&active, hits, &history, ui);
     }
 
-    if let (Some(path), Some(merged)) = (&args.output, &merged) {
+    // Only the file that was asked for. The ledger is written on every run and
+    // holds the same list, so a row for it would be a second line saying what
+    // the first one already said, on every batch of every scan.
+    for (path, merged) in written
+        .iter()
+        .filter(|(path, _)| Some(*path) == args.output.as_deref())
+    {
         // The file is cumulative, so its total is the headline and this run's
         // contribution is the detail — "3 new" against a file of 300 is a very
         // different result from "3 new" against an empty one.
@@ -1735,6 +1860,7 @@ mod tests {
         // having nowhere to put the results.
         assert_eq!(args.input.as_deref(), Some(Path::new("input.txt")));
         assert_eq!(args.output.as_deref(), Some(Path::new("output.txt")));
+        assert_eq!(args.found, Path::new("found.txt"));
 
         // The rest are the defaults written out, so copying the file changes
         // nothing about how a scan behaves.
@@ -2153,6 +2279,71 @@ mod tests {
         }
         let scanned: Vec<usize> = input.inputs.iter().flat_map(Input::lines).collect();
         assert_eq!(scanned, vec![1, 2]);
+    }
+
+    /// An input edited by anything else mid-run is left alone from then on,
+    /// rather than being rewritten over the top of someone else's change.
+    #[test]
+    fn an_input_edited_during_the_run_stops_being_drained() {
+        let key = "0".repeat(64);
+        let path = std::env::temp_dir().join("allkeys-keycheck-queue-edited.txt");
+        std::fs::write(&path, format!("{key}\n{PHRASE}\n")).unwrap();
+
+        let mut queue = Queue::new(&path, &std::fs::read_to_string(&path).unwrap());
+        queue
+            .drain(&[1], &Ui::new())
+            .expect("its own write is fine");
+        assert!(queue.draining());
+
+        // Somebody else appends a line. The next drain notices, warns, and
+        // leaves the file exactly as they left it.
+        let edited = format!("{}\n{}\n", queue.render(), "1".repeat(64));
+        std::fs::write(&path, &edited).unwrap();
+        queue
+            .drain(&[2], &Ui::new())
+            .expect("not an error, a warning");
+        assert!(!queue.draining());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A secret already on file is not scanned again, and the lines that named
+    /// it — including the ones that only repeated it — leave the input with it.
+    #[test]
+    fn what_the_ledger_already_holds_leaves_the_input() {
+        let key = "0".repeat(64);
+        // The phrase is spelled differently in each of the three places it
+        // appears — in the ledger, in the input, and in the input's repeat of
+        // it — because that is the case a plain line match would miss.
+        let ledger = outfile::identities(&outfile::parse(&format!(
+            "{}\n{PHRASE}\n",
+            key.to_uppercase()
+        )));
+
+        let text = format!(
+            "{key}\n{}\n{PHRASE}\n{}\n",
+            PHRASE.replace(' ', "  "),
+            "1".repeat(64)
+        );
+        let mut inputs = parse_input(&text, "", &Ui::new()).unwrap().inputs;
+        // The two spellings of the phrase were already one input, holding line
+        // 3 as a repeat of line 2.
+        assert_eq!(inputs.len(), 3);
+
+        let known = drop_known(&mut inputs, &ledger);
+        assert_eq!(known.secrets, 2);
+        assert_eq!(known.lines, vec![1, 2, 3], "the repeat goes with its line");
+        assert_eq!(kinds(&inputs), "k", "only the key that was not on file");
+    }
+
+    /// The common case, and the one that must cost nothing: an empty ledger
+    /// leaves every input exactly where it was.
+    #[test]
+    fn an_empty_ledger_takes_nothing() {
+        let mut inputs: Vec<Input> = "kpk".chars().map(line).collect();
+        let known = drop_known(&mut inputs, &HashSet::new());
+        assert_eq!((known.secrets, inputs.len()), (0, 3));
     }
 
     /// A line of the given kind — 'p' for a phrase, anything else a key —

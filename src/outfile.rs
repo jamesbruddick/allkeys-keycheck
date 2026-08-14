@@ -6,7 +6,7 @@
 //! a re-run adds what is new, keeps what is already there, and never leaves you
 //! with fewer keys than you started with.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -53,7 +53,7 @@ impl Merged {
 /// `0xAB…` and `ab…` are the same key, and a phrase respaced or recased is the
 /// same wallet — writing either twice would be a duplicate the file should not
 /// grow by.
-fn identity(line: &str) -> String {
+pub fn identity(line: &str) -> String {
     let trimmed = keys::clean(line);
     if let Some(hex) = keys::normalize(trimmed) {
         return hex;
@@ -63,6 +63,20 @@ fn identity(line: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+/// Every secret the file holds, by identity: the set an input file is filtered
+/// against, so a secret already known to be active is never scanned twice.
+///
+/// Identities rather than lines, because the input's spelling of a secret is
+/// rarely the file's — the same rule that stops the file growing a second copy
+/// of a phrase is what recognizes that phrase when it turns up in an input.
+pub fn identities(records: &[Record]) -> HashSet<String> {
+    records
+        .iter()
+        .filter(|record| !record.is_dangling())
+        .map(|record| identity(&record.line))
+        .collect()
 }
 
 /// Read the file back into records. A missing file is an empty list; anything

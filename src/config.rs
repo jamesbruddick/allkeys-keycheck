@@ -2,8 +2,8 @@
 //!
 //! Every command-line option can also be written here, so a repeated scan is
 //! one file and a bare `allkeys-keycheck` rather than a line of flags to
-//! remember. Secrets live in their own table, which is also what the
-//! permission warning points at.
+//! remember. Secrets live in their own table, so the file as a whole is what
+//! needs locking down once any of them is filled in.
 //!
 //! Precedence is command line → environment variable → config file → default.
 //! The file is the weakest layer on purpose: a stale line in it must never
@@ -137,6 +137,7 @@ impl<'de> Deserialize<'de> for Expand {
 pub struct Config {
     pub input: Option<PathBuf>,
     pub output: Option<PathBuf>,
+    pub found: Option<PathBuf>,
     pub upload: Option<bool>,
     pub indices: Option<String>,
     pub expand: Option<Expand>,
@@ -186,8 +187,12 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded, String> {
         }
     };
 
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    // A file named on the command line and not there is worth saying plainly,
+    // rather than through an OS error about a path the user just typed.
+    let text = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("no config file at {}", path.display()),
+        _ => format!("could not read {}: {e}", path.display()),
+    })?;
     let config: Config = toml::from_str(&text)
         .map_err(|e| format!("could not parse {}: {}", path.display(), one_line(&e)))?;
 
@@ -201,7 +206,11 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded, String> {
 /// holds API keys, and there is no undoing an overwrite of those.
 pub fn write_template(path: &Path) -> Result<(), String> {
     if path.exists() {
-        return Err(format!("{} already exists", path.display()));
+        return Err(format!(
+            "{} already exists and is never overwritten, since it may hold your API \
+             keys. Rename or delete it first.",
+            path.display()
+        ));
     }
     write_private(path, TEMPLATE).map_err(|e| format!("could not write {}: {e}", path.display()))
 }

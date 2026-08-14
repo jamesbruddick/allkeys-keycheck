@@ -112,7 +112,10 @@ fn send(
                 let retryable =
                     status.as_u16() == 429 || status.as_u16() == 503 || status.is_server_error();
                 if !retryable {
-                    return Err(format!("upload rejected: {detail}"));
+                    return Err(format!(
+                        "allkeys.directory rejected the upload: {detail}. Retrying \
+                         will not help until that is fixed."
+                    ));
                 }
                 format!("HTTP {status}: {detail}")
             }
@@ -130,7 +133,7 @@ fn send(
             ));
         }
         ui.warn(&format!(
-            "{retry_message} — retrying in {}s",
+            "upload {retry_message} — retrying in {}s",
             backoff.as_secs()
         ));
         sleep(backoff);

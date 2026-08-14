@@ -8,8 +8,13 @@
 # it as each batch finishes, so keep a copy of anything you want to scan twice.
 input = "input.txt"
 
-# Where the secrets with on-chain activity are saved. Merged into, never
-# replaced. A run needs this, upload, or both.
+# The ledger of everything ever found. Written on every run, and read before
+# every scan: a key or phrase already in here leaves the input straight away
+# rather than being looked up a second time.
+found = "found.txt"
+
+# Where the findings are saved. Merged into, never replaced. A run needs this,
+# upload, or both.
 output = "output.txt"
 
 # Also submit found keys to allkeys.directory. This sends private keys off the
