@@ -140,30 +140,20 @@ struct Args {
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 
-    /// How far each expansion round reaches, in indices
+    /// How far each expansion round reaches in indices, or false to not expand
     ///
     /// A phrase that turns something up is followed past the count it was
     /// scanned at, out to the next multiple of this each round, until a round
     /// comes back empty. Raise it to reach further per request on a phrase you
     /// expect to be busy; lower it to stop sooner after the activity ends.
     ///
-    /// Applies to a count --indices only. Explicit windows never expand.
-    #[arg(
-        long,
-        default_value_t = hd::EXPANSION_STEP,
-        value_parser = clap::value_parser!(u32).range(1..),
-        value_name = "N",
-        conflicts_with = "no_expand"
-    )]
-    expand: u32,
-
-    /// Scan the --indices count exactly, without following it further
-    ///
-    /// Turns expansion off, so a count behaves like the windows it names and
-    /// nothing more. Useful for a fixed-cost pass over a large wordlist, where
+    /// `--expand false` turns that off, so a count behaves like the windows it
+    /// names and nothing more — a fixed-cost pass over a large wordlist, where
     /// a phrase that hits would otherwise keep the run going.
-    #[arg(long)]
-    no_expand: bool,
+    ///
+    /// Applies to a count --indices only. Explicit windows never expand.
+    #[arg(long, default_value_t, value_name = "N|false")]
+    expand: config::Expand,
 
     /// Maximum addresses per API request
     ///
@@ -275,10 +265,6 @@ struct Args {
     /// Derive and print addresses without contacting the network
     #[arg(long)]
     dry_run: bool,
-
-    /// Disable colored output
-    #[arg(long)]
-    no_color: bool,
 }
 
 fn main() -> ExitCode {
@@ -291,17 +277,15 @@ fn main() -> ExitCode {
         Err(e) => e.exit(),
     };
 
-    // Before the UI, so a broken config cannot be masked by a colour setting
-    // read out of that same file.
+    let ui = Ui::new();
+
     let path = match load_config(&mut args, &matches) {
         Ok(path) => path,
         Err(e) => {
-            Ui::new(args.no_color).error(&e);
+            ui.error(&e);
             return ExitCode::FAILURE;
         }
     };
-
-    let ui = Ui::new(args.no_color);
 
     if args.init_config {
         return match config::write_template(Path::new(config::DEFAULT_FILE)) {
@@ -361,21 +345,6 @@ fn merge_config(
     matches: &clap::ArgMatches,
     config: config::Config,
 ) -> Result<(), String> {
-    // The pair the command line already refuses, caught again once the file is
-    // in play — whether both halves came out of it or one of each. Layering is
-    // what makes a contradiction easy to write here: `no-expand = true` set once
-    // and forgotten, then an `--expand` typed months later.
-    let expand_asked = !unset(matches, "expand") || config.expand.is_some();
-    let no_expand_asked = !unset(matches, "no_expand") || config.no_expand.unwrap_or(false);
-    if expand_asked && no_expand_asked {
-        return Err(
-            "expand and no-expand are both set: one asks for a phrase that hits \
-                    to be followed further, the other asks for it not to be. Remove \
-                    whichever was not meant"
-                .into(),
-        );
-    }
-
     if unset(matches, "input") {
         args.input = config.input;
     }
@@ -392,11 +361,6 @@ fn merge_config(
     if unset(matches, "expand")
         && let Some(expand) = config.expand
     {
-        if expand == 0 {
-            return Err("expand = 0 in the config file: a round of no indices \
-                        would scan nothing and never finish"
-                .into());
-        }
         args.expand = expand;
     }
     if unset(matches, "api_batch")
@@ -461,8 +425,6 @@ fn merge_config(
     // `upload = false` in the file cannot undo a `-u` on the command line.
     args.upload |= unset(matches, "upload") && config.upload.unwrap_or(false);
     args.dry_run |= unset(matches, "dry_run") && config.dry_run.unwrap_or(false);
-    args.no_expand |= unset(matches, "no_expand") && config.no_expand.unwrap_or(false);
-    args.no_color |= unset(matches, "no_color") && config.no_color.unwrap_or(false);
 
     if unset(matches, "passphrase")
         && let Some(passphrase) = config.secrets.passphrase
@@ -690,16 +652,17 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
 
         // A count span is a starting point, so the phrases that turned something
         // up are followed further out. Explicit windows are taken as written,
-        // and --no-expand asks for a count to be taken that way too.
-        if let Some(start) = args.indices.count().filter(|_| !args.no_expand) {
-            expand(
-                client,
+        // and `--expand false` asks for a count to be taken that way too.
+        if let (Some(start), Some(step)) = (args.indices.count(), args.expand.step()) {
+            let batch = args.api_batch;
+            expand_with(
                 &mut entries,
                 &phrases_by_entry,
                 &mut hits,
                 start,
-                args,
+                step,
                 ui,
+                |addresses| query(client, addresses, batch, "expanding", ui),
             )?;
         }
 
@@ -1029,7 +992,6 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
         }
 
         let groups = by_branch(&entry.addresses);
-        let width = label_width(groups.iter().map(|(branch, _)| branch.len()));
 
         // The sample rows carry a path and an encoding, and the two are
         // measured separately: an index runs from one digit to ten, so padding
@@ -1047,10 +1009,17 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
             .unwrap_or(0);
         let kind_width = label_width(samples().map(|d| d.kind.label().len()));
 
+        // A branch heads a block of sample rows that are indented one step
+        // further, so its count is padded past the path column *and* that step
+        // — landing in the same column the samples put their encoding in. The
+        // alternative is a count that stops short of a column it nearly
+        // reaches, which reads as a misprint rather than as a different row.
+        let branch_width = path_width + ui::DETAIL_INDENT;
+
         for (branch, rows) in groups {
             ui.cont(&format!(
                 "{} {}",
-                ui.dim(&format!("{branch:<width$}")),
+                ui.dim(&format!("{branch:<branch_width$}")),
                 ui.dim(&format!("{} addresses", ui::commas(rows.len() as u64)))
             ));
             // The two ends of the branch: the first index scanned and the last,
@@ -1413,35 +1382,15 @@ fn index_of(derived: &Derived) -> Option<u32> {
 /// most phrases: nothing here. The few that do turn something up are the ones
 /// worth paying for, and for those the shallow pass is exactly the wrong answer
 /// — a used wallet's addresses run on past whatever the scan happened to stop
-/// at. So each end that hit is extended four hundred indices at a time until a
-/// round comes back empty.
+/// at. So each end that hit is extended `step` indices at a time until a round
+/// comes back empty.
 ///
 /// Rounds are run across all growing phrases at once rather than one phrase at
 /// a time, so each round's addresses batch together into full requests the way
 /// the first pass does.
-fn expand(
-    client: &api::Client,
-    entries: &mut [KeyEntry],
-    phrases: &HashMap<usize, hd::Phrase>,
-    hits: &mut HashMap<String, api::Balance>,
-    start: u32,
-    args: &Args,
-    ui: &Ui,
-) -> Result<(), String> {
-    let batch = args.api_batch;
-    expand_with(
-        entries,
-        phrases,
-        hits,
-        start,
-        args.expand,
-        ui,
-        |addresses| query(client, addresses, batch, "expanding", ui),
-    )
-}
-
-/// The expansion itself, with the lookup left to the caller so the loop that
-/// decides how far to go can be exercised without a network.
+///
+/// The lookup is left to the caller so the loop that decides how far to go can
+/// be exercised without a network.
 fn expand_with(
     entries: &mut [KeyEntry],
     phrases: &HashMap<usize, hd::Phrase>,
@@ -1797,7 +1746,7 @@ mod tests {
         assert_eq!(args.passphrase, "");
         assert!(!args.upload);
         assert!(!args.dry_run);
-        assert!(!args.no_color);
+        assert_eq!(args.expand, config::Expand::default());
     }
 
     fn used() -> api::Balance {
@@ -1832,7 +1781,7 @@ mod tests {
 
     /// The same, with the round size `--expand` would have set.
     fn expanded_by(start: u32, active_below: u32, step: u32) -> (Vec<u32>, Vec<u32>) {
-        let ui = Ui::new(true);
+        let ui = Ui::new();
         let secp = Secp256k1::new();
         let phrase = hd::parse(PHRASE, "").expect("test vector phrase is valid");
         let span: hd::Span = start.to_string().parse().expect("a count is a legal span");
@@ -1974,15 +1923,29 @@ mod tests {
         assert_eq!(near, (0..400).collect::<Vec<u32>>());
     }
 
-    /// --no-expand takes a count as exactly the indices it names, so a phrase
-    /// that hits costs no more than one that does not — which is the point of
-    /// a fixed-cost pass over a wordlist.
+    /// `--expand false` takes a count as exactly the indices it names, so a
+    /// phrase that hits costs no more than one that does not — which is the
+    /// point of a fixed-cost pass over a wordlist.
     #[test]
-    fn no_expand_leaves_a_count_where_it_started() {
-        let matches = Args::command().get_matches_from(["allkeys-keycheck", "--no-expand"]);
-        let args = Args::from_arg_matches(&matches).unwrap();
-        assert!(args.indices.count().is_some());
-        assert!(args.indices.count().filter(|_| !args.no_expand).is_none());
+    fn expand_off_leaves_a_count_where_it_started() {
+        for off in ["false", "off", "no"] {
+            let args = Args::try_parse_from(["allkeys-keycheck", "--expand", off]).unwrap();
+            // The count is still a count; it is expansion that is gone, which
+            // is the pair the run itself asks for before it follows anything.
+            assert!(args.indices.count().is_some());
+            assert_eq!(args.expand.step(), None);
+        }
+    }
+
+    /// The same flag still carries the round size, and `true` names the default
+    /// rather than being refused as "not a number".
+    #[test]
+    fn expand_takes_a_size_or_a_yes() {
+        let sized = Args::try_parse_from(["allkeys-keycheck", "--expand", "50"]).unwrap();
+        assert_eq!(sized.expand.step(), Some(50));
+
+        let on = Args::try_parse_from(["allkeys-keycheck", "--expand", "true"]).unwrap();
+        assert_eq!(on.expand, config::Expand::default());
     }
 
     /// Layer a config file under a command line, the way `main` does.
@@ -2127,11 +2090,29 @@ mod tests {
     }
 
     /// A step of zero would ask for rounds of no indices, which would either
-    /// spin forever or quietly scan nothing. Refused from either direction.
+    /// spin forever or quietly scan nothing. It is not read as "do not expand"
+    /// either — that is what `false` is for. Refused from either direction.
     #[test]
     fn a_step_of_zero_is_refused() {
         assert!(Args::try_parse_from(["allkeys-keycheck", "--expand", "0"]).is_err());
-        assert!(merged(&["allkeys-keycheck"], "expand = 0\n").is_err());
+        assert!(toml::from_str::<config::Config>("expand = 0\n").is_err());
+    }
+
+    /// The file can turn expansion off the same way the flag does, and a run
+    /// that says nothing about it still expands.
+    #[test]
+    fn the_file_can_turn_expansion_off() {
+        let args = merged(&["allkeys-keycheck"], "expand = false\n").unwrap();
+        assert_eq!(args.expand.step(), None);
+
+        let sized = merged(&["allkeys-keycheck"], "expand = 50\n").unwrap();
+        assert_eq!(sized.expand.step(), Some(50));
+
+        // And a flag still beats the file, which is the whole point of the
+        // layering: `expand = false` left in a file months ago must not quietly
+        // swallow an `--expand` typed today.
+        let flagged = merged(&["allkeys-keycheck", "--expand", "25"], "expand = false\n").unwrap();
+        assert_eq!(flagged.expand.step(), Some(25));
     }
 
     /// A repeat holds no secret of its own — the line it repeats is still in the
@@ -2146,7 +2127,7 @@ mod tests {
             "{key}\n{PHRASE}\n0X{key}\n{key}\n",
             key = "0".repeat(64).to_uppercase()
         );
-        let parsed = parse_input(&raw, "", &Ui::new(true)).expect("the lines parse");
+        let parsed = parse_input(&raw, "", &Ui::new()).expect("the lines parse");
 
         // Three spellings of one key, so one input standing on line 1 with the
         // other two recorded as repeats — and the phrase untouched beside it.
@@ -2158,7 +2139,7 @@ mod tests {
 
         // The repeats are what leaves up front; the line that named the secret
         // is not among them, and is all that `lines()` yields once they have.
-        let mut input = parse_input(&raw, "", &Ui::new(true)).expect("the lines parse");
+        let mut input = parse_input(&raw, "", &Ui::new()).expect("the lines parse");
         let spent: Vec<usize> = input
             .inputs
             .iter()
@@ -2181,7 +2162,7 @@ mod tests {
             'p' => PHRASE.to_string(),
             _ => "0".repeat(64),
         };
-        let parsed = parse_input(&raw, "", &Ui::new(true)).expect("a valid line parses");
+        let parsed = parse_input(&raw, "", &Ui::new()).expect("a valid line parses");
         parsed
             .inputs
             .into_iter()
@@ -2250,36 +2231,20 @@ mod tests {
         }
     }
 
-    /// Asking to expand and not to expand in the same breath is a mistake
-    /// worth naming, rather than one of the two silently winning — from
-    /// whichever layer each half arrives on. Layering is what makes the
-    /// contradiction easy to write: `no-expand = true` set once and forgotten,
-    /// then an `--expand` typed months later.
+    /// The settings that were dropped are refused by name rather than ignored.
+    /// A file carried over from an older version is the likely way to meet
+    /// them, and a `no-expand = true` that silently did nothing would turn a
+    /// fixed-cost pass into an expanding one without saying so.
     #[test]
-    fn expand_and_no_expand_together_are_refused() {
-        assert!(
-            Args::try_parse_from(["allkeys-keycheck", "--expand", "800", "--no-expand"]).is_err()
-        );
-        // Both halves in the file.
-        assert!(merged(&["allkeys-keycheck"], "expand = 800\nno-expand = true\n").is_err());
-        // One of each, in either arrangement.
-        assert!(merged(&["allkeys-keycheck", "--no-expand"], "expand = 800\n").is_err());
-        assert!(
-            merged(
-                &["allkeys-keycheck", "--expand", "800"],
-                "no-expand = true\n"
-            )
-            .is_err()
-        );
+    fn the_settings_that_were_dropped_are_refused_by_name() {
+        for gone in ["no-expand = true\n", "no-color = true\n"] {
+            let Err(e) = toml::from_str::<config::Config>(gone) else {
+                panic!("{gone:?} must not be accepted");
+            };
+            assert!(e.to_string().contains("unknown field"));
+        }
 
-        // `no-expand = false` is not a request for anything, so it does not
-        // contradict an --expand: only a file that turns it on can.
-        let args = merged(
-            &["allkeys-keycheck", "--expand", "800"],
-            "no-expand = false\n",
-        )
-        .unwrap();
-        assert_eq!(args.expand, 800);
-        assert!(!args.no_expand);
+        assert!(Args::try_parse_from(["allkeys-keycheck", "--no-expand"]).is_err());
+        assert!(Args::try_parse_from(["allkeys-keycheck", "--no-color"]).is_err());
     }
 }

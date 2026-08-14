@@ -69,6 +69,12 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// retrying cannot fix a response that is consistently missing the address.
 const MAX_SINGLE_ATTEMPTS: u32 = 10;
 
+/// How long one "splitting batch" notice stands for the rest. A batch that is
+/// too large for the server is too large for every worker sending one, so these
+/// arrive in bursts of `--concurrency` saying the same thing; the first is the
+/// one worth reading, and the splitting itself is quick.
+const SPLIT_NOTICE_WINDOW: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Balance {
     pub final_balance: u64,
@@ -221,10 +227,14 @@ impl<'a> Client<'a> {
                     // server to accept. Halve it and try each side.
                     if addresses.len() > 1 {
                         let (left, right) = addresses.split_at(addresses.len() / 2);
-                        self.ui.warn(&format!(
-                            "incomplete response for {} addresses, splitting batch",
-                            addresses.len()
-                        ));
+                        self.ui.warn_throttled(
+                            &format!("short response for {}", addresses.len()),
+                            SPLIT_NOTICE_WINDOW,
+                            &format!(
+                                "incomplete response for {} addresses, splitting batch",
+                                addresses.len()
+                            ),
+                        );
                         self.collect_into(left, found)?;
                         return self.collect_into(right, found);
                     }
@@ -240,9 +250,17 @@ impl<'a> Client<'a> {
                     self.ui
                         .warn(&format!("no data for {}, retrying", addresses[0]));
                 }
-                Err(e) => self
-                    .ui
-                    .warn(&format!("{e} — retrying in {}s", backoff.as_secs())),
+                // Keyed on the error rather than on the batch: when the
+                // endpoint goes down every request in flight fails with the
+                // same message, and that is one piece of news, not eight. The
+                // window is the backoff about to be slept, so the report comes
+                // back as often as the retries do — a long outage still says so
+                // periodically instead of falling silent.
+                Err(e) => self.ui.warn_throttled(
+                    &e,
+                    backoff,
+                    &format!("{e} — retrying in {}s", backoff.as_secs()),
+                ),
             }
 
             sleep(backoff);

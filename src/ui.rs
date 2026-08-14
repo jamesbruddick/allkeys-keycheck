@@ -3,7 +3,10 @@
 //! Color is disabled automatically when output is redirected or when NO_COLOR
 //! is set, so piping to a file or a log stays clean.
 
+use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Labels sit right-aligned in a gutter this wide, so every value in the run
 /// starts at the same column and the output reads as one table.
@@ -11,6 +14,11 @@ const GUTTER: usize = 12;
 
 /// Column where values begin: two-space margin, gutter, two-space separator.
 const VALUE_COL: usize = 2 + GUTTER + 2;
+
+/// How far a `detail` sits inside the `cont` line it belongs to. Public because
+/// a caller laying out columns across both has to pad by the same step to keep
+/// them in one grid.
+pub const DETAIL_INDENT: usize = 2;
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -54,18 +62,28 @@ pub struct Ui {
     /// set of specific oranges that the 256-colour cube only approximates, so
     /// it is worth asking rather than always settling for the nearest slot.
     truecolor: bool,
+    /// When each throttled warning may next be repeated, by key. Requests are
+    /// in flight several at a time and meet the same outage in the same second,
+    /// so without this the number of warnings a problem produces is a reading of
+    /// `--concurrency` rather than of the problem.
+    silence: Mutex<HashMap<String, Instant>>,
 }
 
 impl Ui {
-    pub fn new(no_color: bool) -> Self {
-        let allowed = !no_color
-            && std::env::var_os("NO_COLOR").is_none()
+    /// Colour is worked out from the terminal rather than asked about: on when
+    /// the stream is a terminal that did not say otherwise, off when output is
+    /// redirected, when `NO_COLOR` is set, or when `TERM` is `dumb`. Those are
+    /// the conventions every other tool already honours, so a user who wants
+    /// plain output has set them once for all of them.
+    pub fn new() -> Self {
+        let allowed = std::env::var_os("NO_COLOR").is_none()
             && std::env::var("TERM").map_or(true, |t| t != "dumb");
         let ui = Self {
             color: allowed && std::io::stdout().is_terminal(),
             interactive: allowed && std::io::stderr().is_terminal(),
             truecolor: std::env::var("COLORTERM")
                 .is_ok_and(|v| v.contains("truecolor") || v.contains("24bit")),
+            silence: Mutex::new(HashMap::new()),
         };
         // The cursor spends the run parked at the end of a progress bar that is
         // being redrawn under it, which reads as flicker. Hidden for the length
@@ -153,7 +171,7 @@ impl Ui {
 
     /// Detail nested one step deeper than a continuation line.
     pub fn detail(&self, text: &str) {
-        println!("{}{text}", " ".repeat(VALUE_COL + 2));
+        println!("{}{text}", " ".repeat(VALUE_COL + DETAIL_INDENT));
     }
 
     /// Blank separator between groups of rows.
@@ -173,6 +191,33 @@ impl Ui {
             ("", padded)
         };
         eprintln!("{clear}  {label}  {text}");
+    }
+
+    /// A warning several workers will raise at once: printed only if nothing
+    /// else has raised the same `key` within `window`, so one line stands for
+    /// however many requests are in flight.
+    ///
+    /// The key is what the warning is *about* and the text is what it says
+    /// this time, which is why they are separate: a retry line naming a growing
+    /// backoff is new text about an unchanged problem, and it is the problem
+    /// that should decide whether it is worth another line.
+    pub fn warn_throttled(&self, key: &str, window: Duration, text: &str) {
+        let now = Instant::now();
+        {
+            // Poisoning only means some other thread panicked mid-warning;
+            // there is nothing here to be left inconsistent, and a run should
+            // not die over a log line.
+            let mut silence = self.silence.lock().unwrap_or_else(|e| e.into_inner());
+            // Expired entries are swept on the way past rather than left to
+            // accumulate — keys can carry an address, and a long scan sees a
+            // lot of addresses.
+            silence.retain(|_, until| *until > now);
+            if silence.contains_key(key) {
+                return;
+            }
+            silence.insert(key.to_string(), now + window);
+        }
+        self.warn(text);
     }
 
     pub fn error(&self, text: &str) {
@@ -210,7 +255,14 @@ impl Ui {
         // than allowed to shift the line.
         let fitted: String = label.chars().take(GUTTER).collect();
         let gutter = format!("{fitted:>GUTTER$}");
-        eprint!("\r  {DIM}{gutter}{RESET}  {bar} {DIM}{done}/{total}{RESET}\x1b[K");
+        // The trailing `\n…\x1b[A` opens a blank line under the bar and steps
+        // back onto it: the bar is the last thing in the terminal for the
+        // length of the run, and sitting flush against the shell's next prompt
+        // — or against a warning that lands right below it — reads as cramped.
+        // The line below is cleared as well as opened, since the bar moves down
+        // the screen as warnings push it along and would otherwise leave the
+        // previous frame's tail sitting there.
+        eprint!("\r  {DIM}{gutter}{RESET}  {bar} {DIM}{done}/{total}{RESET}\x1b[K\n\x1b[K\x1b[A");
         let _ = std::io::stderr().flush();
     }
 
@@ -220,6 +272,16 @@ impl Ui {
             eprint!("\r\x1b[K");
             let _ = std::io::stderr().flush();
         }
+    }
+}
+
+/// `new` takes no arguments now that colour is detected rather than configured,
+/// which makes a `Default` the same thing. It is spelled out rather than derived
+/// because constructing a `Ui` hides the terminal's cursor, and the `Drop` that
+/// gives it back is the reason a stray temporary would be a bug.
+impl Default for Ui {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

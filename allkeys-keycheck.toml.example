@@ -20,11 +20,9 @@ upload = false
 # end, or absolute windows like "10..110". Always quoted.
 # indices = "10"
 
-# How far each round follows a phrase that turned something up, in indices.
+# How far each round follows a phrase that turned something up, in indices,
+# or false to scan the indices count exactly and follow nothing further.
 # expand = 400
-
-# Scan the indices count exactly, following nothing further.
-# no-expand = true
 
 # Maximum addresses per API request. 1500 is also the most the API will take —
 # a larger batch comes back empty rather than as an error.
@@ -42,9 +40,6 @@ upload = false
 
 # Derive and print addresses without contacting the network.
 # dry-run = true
-
-# Disable coloured output.
-# no-color = true
 
 
 # Secrets. Kept here rather than on the command line, where they are visible to

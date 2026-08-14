@@ -70,7 +70,7 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.6.0
+  allkeys-keycheck 0.6.2
 
       scanning  keys.txt
          input  1 key · 1 duplicate removed · 1 bad line removed
@@ -103,7 +103,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.6.0
+  allkeys-keycheck 0.6.2
 
       scanning  keys.txt
          input  1 key · 1 phrase
@@ -120,10 +120,10 @@ network request:
          batch  1 phrase
 
        12-word  abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about
-                m/44'/0'/0'/0      20 addresses
+                m/44'/0'/0'/0              20 addresses
                   m/44'/0'/0'/0/0          p2pkh-uncompressed 18LhnLKXjcTw5xJFiTxntnKit2Gd63eWFm
                   m/44'/0'/0'/0/2147483647 p2tr               bc1pegaldj4c9fcutx8q546p5f8yrw6xqxjfjw9qcdhea6stcgvt34tq2wgxw4
-                m/44'/0'/0'/1      20 addresses
+                m/44'/0'/0'/1              20 addresses
 ```
 
 A key prints all five of its addresses. A phrase has too many to list, so each
@@ -400,10 +400,10 @@ requests whether one phrase is still growing or forty are:
 
 Each round reaches out to the next multiple of `--expand`, which defaults to
 400. Raising it reaches further per request on a phrase you expect to be busy;
-lowering it stops sooner once the activity ends. `--no-expand` turns the whole
-thing off, so a count is scanned as exactly the indices it names — a fixed-cost
-pass over a large wordlist, where a single phrase that hits would otherwise
-keep the run going. The two cannot be passed together.
+lowering it stops sooner once the activity ends. `--expand false` turns the
+whole thing off, so a count is scanned as exactly the indices it names — a
+fixed-cost pass over a large wordlist, where a single phrase that hits would
+otherwise keep the run going.
 
 Expansion applies to the **count form only**. Explicit windows are scanned
 exactly as written and never grow, which is what makes `-i 400000..500000` safe
@@ -501,7 +501,7 @@ simply having no config file is not.
 `--init-config` creates the file `0600`, readable only by you, since it is
 where your API keys go.
 
-Keys are the long flag names without the leading dashes: `dry-run`, `no-color`,
+Keys are the long flag names without the leading dashes: `dry-run`, `expand`,
 `api-batch`. A key that isn't one of them is an error rather than being ignored,
 so a typo can't quietly cost you a passphrase. `indices` is written as a string,
 because `10..110` is not a TOML number.
@@ -523,8 +523,7 @@ environment variables for anyone who prefers them.
 | `-o, --output <FILE>` | `output` in config | Merge active keys into a file |
 | `-u, --upload` | — | Submit found keys to allkeys.directory |
 | `-i, --indices <INDICES>` | `10` | Which indices of each chain to scan — a count, or windows |
-| `--expand <N>` | `400` | How far each expansion round reaches |
-| `--no-expand` | — | Scan the count exactly, never following it further |
+| `--expand <N\|false>` | `400` | How far each expansion round reaches, or `false` to scan the count exactly |
 | `--passphrase <WORD>` | config / `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
 | `--api-batch <N>` | `1500` | Max addresses per API request — also the maximum accepted |
 | `--concurrency <N>` | `8` | API requests to keep in flight at once (max 16) |
@@ -535,7 +534,6 @@ environment variables for anyone who prefers them.
 | `--config <FILE>` | `allkeys-keycheck.toml` | Read settings from a specific file |
 | `--init-config` | — | Write a commented `allkeys-keycheck.toml` and exit |
 | `--dry-run` | — | Print derived addresses, contact no network |
-| `--no-color` | — | Disable coloured output |
 | `-h, --help` | — | Print help — `-h` for a summary, `--help` for the detail |
 | `-V, --version` | — | Print version |
 

@@ -9,15 +9,126 @@
 //! The file is the weakest layer on purpose: a stale line in it must never
 //! override a flag typed on the spot.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
+
+use crate::hd;
 
 /// The file looked for in the current directory when `--config` is not given.
 pub const DEFAULT_FILE: &str = "allkeys-keycheck.toml";
 
 /// Written by `--init-config`, and shipped alongside the binary.
 pub const TEMPLATE: &str = include_str!("../allkeys-keycheck.toml.example");
+
+/// How far a phrase that turned something up is followed past the count it was
+/// scanned at — or off, taking a count as exactly the indices it names.
+///
+/// One setting rather than a size and a switch beside it. The two are not
+/// independent: a round size means nothing once expansion is off, so a separate
+/// off-switch only creates a contradiction to be written and then caught. Here
+/// there is nothing to contradict, on the command line or in the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expand {
+    Off,
+    /// Reach this far, in indices, each round.
+    Rounds(u32),
+}
+
+impl Expand {
+    /// How far each round reaches, or `None` when a count is to be taken as
+    /// written.
+    pub fn step(self) -> Option<u32> {
+        match self {
+            Self::Off => None,
+            Self::Rounds(step) => Some(step),
+        }
+    }
+}
+
+impl Default for Expand {
+    fn default() -> Self {
+        Self::Rounds(hd::EXPANSION_STEP)
+    }
+}
+
+/// What a value has to be wrong in, either surface, said once. A round of no
+/// indices is refused rather than treated as off: it reads as a size, and a
+/// size of zero would scan nothing round after round.
+const EXPAND_EXPECTED: &str =
+    "how far each expansion round reaches, in indices, or false to not expand at all";
+
+impl FromStr for Expand {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "false" | "off" | "no" => Ok(Self::Off),
+            "true" | "on" | "yes" => Ok(Self::default()),
+            number => match number.parse::<u32>() {
+                Ok(0) => Err(
+                    "a round of no indices would scan nothing and never finish; \
+                     pass false to not expand"
+                        .into(),
+                ),
+                Ok(step) => Ok(Self::Rounds(step)),
+                Err(_) => Err(format!("expected {EXPAND_EXPECTED}")),
+            },
+        }
+    }
+}
+
+/// Printed as it would be typed, which is what `--help` shows as the default.
+impl fmt::Display for Expand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Off => f.write_str("false"),
+            Self::Rounds(step) => write!(f, "{step}"),
+        }
+    }
+}
+
+/// `expand = 400` and `expand = false` are both natural TOML, so both are
+/// taken, along with the string a `--expand` copied into the file would be.
+impl<'de> Deserialize<'de> for Expand {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl de::Visitor<'_> for Visitor {
+            type Value = Expand;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(EXPAND_EXPECTED)
+            }
+
+            fn visit_bool<E: de::Error>(self, on: bool) -> Result<Expand, E> {
+                Ok(if on { Expand::default() } else { Expand::Off })
+            }
+
+            fn visit_u64<E: de::Error>(self, step: u64) -> Result<Expand, E> {
+                match u32::try_from(step) {
+                    Ok(step) if step > 0 => Ok(Expand::Rounds(step)),
+                    _ => Err(E::custom(format!("expand = {step}: {EXPAND_EXPECTED}"))),
+                }
+            }
+
+            fn visit_i64<E: de::Error>(self, step: i64) -> Result<Expand, E> {
+                match u64::try_from(step) {
+                    Ok(step) => self.visit_u64(step),
+                    Err(_) => Err(E::custom(format!("expand = {step}: {EXPAND_EXPECTED}"))),
+                }
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<Expand, E> {
+                text.parse().map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
 
 /// The file's contents. Every field is optional: a config that sets one value
 /// and leaves the rest to the defaults is the normal case, not a partial file.
@@ -28,14 +139,12 @@ pub struct Config {
     pub output: Option<PathBuf>,
     pub upload: Option<bool>,
     pub indices: Option<String>,
-    pub expand: Option<u32>,
-    pub no_expand: Option<bool>,
+    pub expand: Option<Expand>,
     pub api_batch: Option<usize>,
     pub concurrency: Option<usize>,
     pub phrase_batch: Option<u64>,
     pub delay: Option<u64>,
     pub dry_run: Option<bool>,
-    pub no_color: Option<bool>,
 
     #[serde(default)]
     pub secrets: Secrets,
