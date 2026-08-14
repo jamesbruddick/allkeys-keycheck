@@ -70,10 +70,10 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.5.1
+  allkeys-keycheck 0.6.0
 
       scanning  keys.txt
-         input  1 key · 1 duplicate collapsed · 1 bad line removed
+         input  1 key · 1 duplicate removed · 1 bad line removed
                 line 3: not a 32-byte hex key or a BIP39 phrase
         lookup  blockchain.info · 5 addresses · 1 request · 0.4s
          found  1 of 1 key used
@@ -103,7 +103,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.5.1
+  allkeys-keycheck 0.6.0
 
       scanning  keys.txt
          input  1 key · 1 phrase
@@ -132,7 +132,9 @@ branch is summarised by its two ends.
 ## How a run works
 
 1. **Read.** Every line is parsed and de-duplicated. Phrases are identified by
-   their seed, so the same wallet written two ways is read in once.
+   their seed, so the same wallet written two ways is read in once. The spare
+   lines — repeats, and anything that named no secret at all — leave the input
+   here, before a single address is derived.
 2. **Derive.** Each secret is expanded into addresses — five for a bare key,
    hundreds or more for a phrase.
 3. **Query.** Addresses are batched into as few blockchain.info requests as the
@@ -142,7 +144,7 @@ branch is summarised by its two ends.
 5. **Write.** Findings are merged into the `-o` file and/or uploaded, and the
    lines just scanned leave the input file.
 
-Steps 2 to 5 run **fifty phrases at a time**. See [Batches](#batches).
+Steps 2 to 5 run **a hundred phrases at a time**. See [Batches](#batches).
 
 ## Input
 
@@ -174,13 +176,17 @@ always holds exactly what is still to do:
   that already finished are gone; only the ones that never ran are left.
 - **Nothing leaves the file until it is safely somewhere else.** A batch whose
   write or upload failed stops the run with its lines still in place.
-- **Bad lines go first, before the scan starts.** A line that is neither a key
-  nor a phrase will never be scanned, so leaving it would mean every future run
-  reading it, reporting it and stepping over it again. It is named on screen as
-  it goes.
+- **Bad lines and duplicates go first, before the scan starts.** Neither will
+  ever be scanned in its own right — a line that is neither a key nor a phrase
+  names no secret, and a line repeating a secret named earlier in the file adds
+  none — so leaving either would mean every future run reading it, reporting it
+  and stepping over it again. Bad lines are named on screen as they go.
+- **Removing a repeat early takes nothing with it.** The line it repeats stays
+  exactly where it is until the batch carrying it has been written and uploaded,
+  so a run interrupted straight afterwards still holds every secret it started
+  with — once each instead of twice. `0xAB…` and `ab…` are one key, and the
+  first spelling in the file is the one that stays.
 - **Comments and blank lines stay** exactly where they were.
-- **A key written twice in two spellings has both lines removed**, since both
-  hold the secret that was scanned.
 - **`--dry-run` never touches the file.**
 
 The run ends by saying what it left behind:
@@ -197,9 +203,10 @@ than writing over the change.
 
 ### Batches
 
-Bare keys are scanned first, all together. The phrases then follow **fifty at a
-time** — `--phrase-batch` sets the number — each batch carried the whole way,
-derived, queried, expanded, written and uploaded, before the next one starts:
+Bare keys are scanned first, all together. The phrases then follow **a hundred
+at a time** — `--phrase-batch` sets the number — each batch carried the whole
+way, derived, queried, expanded, written and uploaded, before the next one
+starts:
 
 ```
          batch  100 keys
@@ -207,12 +214,12 @@ derived, queried, expanded, written and uploaded, before the next one starts:
          found  3 of 100 keys used
        written  active-keys.txt · 3 on file · 3 new
 
-         batch  1 of 38 · 50 phrases
-        lookup  blockchain.info · 40,000 addresses · 24 requests · 31s
-         found  2 of 50 phrases used
+         batch  1 of 19 · 100 phrases
+        lookup  blockchain.info · 80,000 addresses · 54 requests · 12.4s
+         found  2 of 100 phrases used
        written  active-keys.txt · 5 on file · 2 new
 
-         batch  2 of 38 · 50 phrases
+         batch  2 of 19 · 100 phrases
         ...
 
          total  2,000 scanned · 9 found
@@ -223,7 +230,7 @@ Two things follow from that, both of which matter on a long run:
 - **Findings reach the destination as they are made.** A run that dies in batch
   30 keeps everything the first 29 found. Nothing waits for the end.
 - **Memory stays flat.** One batch of addresses is held at a time, so a file of
-  fifty phrases and a file of fifty thousand cost the same to scan.
+  a hundred phrases and a file of fifty thousand cost the same to scan.
 
 **Every bare key goes first, in one batch of its own** — wherever they sit in
 the file. They are cheap, five addresses each and one request for thousands of
@@ -519,9 +526,10 @@ environment variables for anyone who prefers them.
 | `--expand <N>` | `400` | How far each expansion round reaches |
 | `--no-expand` | — | Scan the count exactly, never following it further |
 | `--passphrase <WORD>` | config / `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
-| `--api-batch <N>` | `1500` | Max addresses per API request |
-| `--phrase-batch <N>` | `50` | How many phrases to carry through the run at a time |
-| `--delay <MS>` | `0` | Pause between successful API requests |
+| `--api-batch <N>` | `1500` | Max addresses per API request — also the maximum accepted |
+| `--concurrency <N>` | `8` | API requests to keep in flight at once (max 16) |
+| `--phrase-batch <N>` | `100` | How many phrases to carry through the run at a time |
+| `--delay <MS>` | `0` | Pause each connection after a successful API request |
 | `--blockchain-api-key <KEY>` | config / `$BLOCKCHAIN_API_KEY` | blockchain.info key, raises the rate limit |
 | `--allkeys-api-key <KEY>` | config / `$ALLKEYS_API_KEY` | allkeys.directory key, required by `--upload` |
 | `--config <FILE>` | `allkeys-keycheck.toml` | Read settings from a specific file |
@@ -542,20 +550,65 @@ plain readable text with no escape codes.
 
 ### Batching, and the 64 KiB trap
 
-Addresses are sent as a POST body, so each request carries roughly 1,300–1,800
-of them instead of a few dozen. 2,000 keys (10,000 addresses) takes 8 requests
-and about 10 seconds.
+Addresses are sent as a POST body, so each request carries up to 1,500 of them
+instead of a few dozen. 2,000 keys (10,000 addresses) takes 8 requests and about
+two seconds.
 
 The server caps the request body at 64 KiB, and enforces that cap *silently*: an
 oversized batch comes back as `HTTP 200 {}`, which is indistinguishable from
-"none of these addresses were ever used". Two things guard against that:
+"none of these addresses were ever used". Three things guard against that:
 
 - Batches are bounded by **encoded body size**, not address count. A count-based
   limit is unsafe because bech32 addresses are nearly twice the length of base58
   ones — 1,860 base58 addresses fit where 1,800 bech32 addresses do not.
+- **`--api-batch` will not go above 1,500** — the default and the maximum both,
+  refused above rather than clamped. That is not quite where the wall is: 1,750
+  base58 addresses (a 64,693-byte body) are still answered in full, and 1,900
+  (70,228 bytes) are not. It sits below the wall deliberately, because the
+  body-size bound already decides how many addresses go in a request and a
+  count raised past it buys nothing — while a batch of 2,000 does not fail, it
+  answers `200 {}`, which only the completeness check tells apart from an empty
+  result.
 - **Every response is checked against the addresses that were requested.** A
   short response is treated as a failure, never as an answer: the batch is
   halved and each side retried until every address is accounted for.
+
+### Concurrency
+
+A request is almost entirely waiting — roughly 1.3 seconds on the wire for a few
+milliseconds of parsing — so batches are looked up **eight at a time**.
+`--concurrency` sets how many, up to 16.
+
+The endpoint does not rate-limit this. Measured against it, throughput scales
+flat-out linearly from one request in flight to eight, with no 429s and no rise
+in latency:
+
+| In flight | 8 requests of 1,500 | Throughput |
+| --- | --- | --- |
+| 1 | 12.8s | 935 addr/s |
+| 2 | 5.9s | 2,031 addr/s |
+| 4 | 3.9s | 3,058 addr/s |
+| 8 | 2.5s | 4,808 addr/s |
+
+The gain is entirely in the waiting, so a scan costs blockchain.info no more
+work than the same addresses did serially — it just stops spreading that work
+over five times as long. Eight is where measurement stopped rather than where
+the server pushed back, which is why the ceiling is 16 and not higher.
+
+Concurrency changes only how fast a scan goes, never what it finds. Lower it to
+be gentler on the endpoint, or to `1` if a flaky connection would rather have
+one request at a time.
+
+`--delay` pauses each connection after a successful request, so it paces one
+worker rather than the scan as a whole. Because that would make an existing
+`--delay` weaker than it used to be — eight connections each pausing 2s is
+eight times the request rate that setting once bought — **a delay asked for
+without a concurrency alongside it still means one request at a time**, exactly
+as in earlier versions. Pass both to get a paced eight.
+
+The blockchain.info API key that `--blockchain-api-key` takes raises a
+*documented* rate limit that this endpoint does not appear to apply in the first
+place. It is supported, but a scan does not need one.
 
 ### Retries
 

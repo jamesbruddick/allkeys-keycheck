@@ -41,7 +41,7 @@ const MAX_LISTED_ADDRESSES: usize = 32;
 /// would reach the output file until the last one had been queried. Bare keys
 /// are not counted: five addresses each is not what makes a run large.
 /// `--phrase-batch` overrides it.
-const PHRASES_PER_BATCH: u64 = 50;
+const PHRASES_PER_BATCH: u64 = 100;
 
 /// Examples and the one rule a first run can trip over. Shown under both `-h`
 /// and `--help`: someone reaching for the short form is usually after the
@@ -167,18 +167,45 @@ struct Args {
 
     /// Maximum addresses per API request
     ///
-    /// Requests are additionally capped by body size, which is the limit the
-    /// server actually enforces.
+    /// The default is also the maximum: 1,500 addresses is as much as fits in
+    /// the 64 KiB body the server accepts. A larger batch is not refused by the
+    /// API, it is silently truncated to nothing — HTTP 200 with an empty
+    /// object, which reads exactly like a batch where no address was ever used
+    /// — so there is nothing above this to raise it to.
+    ///
+    /// Requests are additionally capped by body size, since bech32 addresses
+    /// are nearly twice the length of base58 ones and a count alone cannot tell
+    /// which of the two a batch holds.
     #[arg(
         long,
-        default_value_t = 1500,
+        default_value_t = api::MAX_API_BATCH,
         // `value_parser!(usize)` has no range of its own — the ranged parser is
         // built over u64 and converted, which is what the macro does for the
         // sizes below anyway.
-        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new()
+            .range(1..=api::MAX_API_BATCH as u64),
         value_name = "N"
     )]
     api_batch: usize,
+
+    /// How many API requests to keep in flight at once
+    ///
+    /// A lookup is almost entirely waiting on the network, so several at a time
+    /// is most of what makes a large scan finish: eight requests together move
+    /// roughly five times the addresses one at a time does, over the same
+    /// endpoint and with the same coverage.
+    ///
+    /// Lower it to be gentler on blockchain.info, or if a flaky connection is
+    /// happier with one request at a time. It changes only how fast a scan
+    /// goes, never what it finds.
+    #[arg(
+        long,
+        default_value_t = api::DEFAULT_CONCURRENCY,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new()
+            .range(1..=api::MAX_CONCURRENCY as u64),
+        value_name = "N"
+    )]
+    concurrency: usize,
 
     /// How many phrases to carry through the run at a time
     ///
@@ -380,7 +407,27 @@ fn merge_config(
                         addresses would ask the API about nothing"
                 .into());
         }
+        if batch > api::MAX_API_BATCH {
+            return Err(format!(
+                "api-batch = {batch} in the config file: {} is the most that fits \
+                 in the request body the API accepts, and a larger batch comes \
+                 back empty rather than as an error",
+                api::MAX_API_BATCH
+            ));
+        }
         args.api_batch = batch;
+    }
+    if unset(matches, "concurrency")
+        && let Some(concurrency) = config.concurrency
+    {
+        if concurrency == 0 || concurrency > api::MAX_CONCURRENCY {
+            return Err(format!(
+                "concurrency = {concurrency} in the config file: it must be \
+                 between 1 and {}",
+                api::MAX_CONCURRENCY
+            ));
+        }
+        args.concurrency = concurrency;
     }
     if unset(matches, "phrase_batch")
         && let Some(batch) = config.phrase_batch
@@ -396,6 +443,19 @@ fn merge_config(
         && let Some(delay) = config.delay
     {
         args.delay = delay;
+    }
+    // `--delay` is older than concurrency and means one thing: slow this scan
+    // down. It is applied by the worker that made the request, so eight of them
+    // each honouring a 2s pause is eight times the request rate that same
+    // setting used to buy — the one control for going easy on the endpoint,
+    // quietly weakened by a default the user never chose. So a delay that was
+    // asked for without a concurrency to go with it still means one request at
+    // a time, exactly as it did before. Asking for both is another matter: that
+    // is someone who has read what each does and wants a paced eight.
+    let delay_asked = !unset(matches, "delay") || config.delay.is_some_and(|d| d > 0);
+    let concurrency_asked = !unset(matches, "concurrency") || config.concurrency.is_some();
+    if args.delay > 0 && delay_asked && !concurrency_asked {
+        args.concurrency = 1;
     }
     // A flag is either passed or not, so the file can only ever turn one on —
     // `upload = false` in the file cannot undo a `-u` on the command line.
@@ -474,7 +534,7 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     let text = fs::read_to_string(input)
         .map_err(|e| format!("could not read {}: {e}", input.display()))?;
 
-    let parsed = parse_input(&text, &args.passphrase, ui)?;
+    let mut parsed = parse_input(&text, &args.passphrase, ui)?;
     let count = parsed.inputs.len();
 
     // Related figures share one line, separated by a middot, so the run reads
@@ -504,9 +564,16 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     }
     if parsed.duplicates > 0 {
         facts.push(format!(
-            "{} duplicate{} collapsed",
+            "{} duplicate{} {}",
             ui::commas(parsed.duplicates as u64),
-            plural(parsed.duplicates)
+            plural(parsed.duplicates),
+            // Collapsed either way — one secret is scanned once however many
+            // lines named it. On a real run the spare lines also leave the file
+            // straight away, which is a different thing to have been told.
+            match args.dry_run {
+                true => "collapsed",
+                false => "removed",
+            }
         ));
     }
     if !parsed.rejected.is_empty() {
@@ -539,12 +606,37 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
 
     let mut queue = Queue::new(input, &text);
 
-    // Before the scan rather than after it: nothing will ever be scanned from a
-    // line that named no secret, so leaving it in the queue would mean every
-    // run from here on reading it, reporting it and stepping over it again.
-    if !args.dry_run && !parsed.rejected.is_empty() {
-        let bad: Vec<usize> = parsed.rejected.iter().map(|line| line.number).collect();
-        queue.drain(&bad, ui)?;
+    // Before the scan rather than after it, for the two kinds of line that will
+    // never be scanned in their own right: one that named no secret at all, and
+    // one that repeated a secret an earlier line already named. Leaving either
+    // in the queue would mean every run from here on reading it, reporting it
+    // and stepping over it again.
+    //
+    // A repeat can go this early without weakening the rule that nothing leaves
+    // the file until it is safely somewhere else, because that rule is about
+    // secrets and a repeat holds no secret of its own. The line it repeats stays
+    // exactly where it was until the batch carrying it is written and uploaded,
+    // so an interrupted run still has every secret it started with — just once
+    // each instead of twice.
+    //
+    // Both go in a single write: two drains would rewrite the file twice, and
+    // the second would be re-reading what the first had just put there.
+    if !args.dry_run {
+        let mut spent: Vec<usize> = parsed.rejected.iter().map(|line| line.number).collect();
+        spent.extend(
+            parsed
+                .inputs
+                .iter()
+                .flat_map(|input| input.repeats.iter().copied()),
+        );
+        if !spent.is_empty() {
+            queue.drain(&spent, ui)?;
+            // Gone from the file, so no longer this secret's to take with it
+            // when its batch finishes.
+            for input in &mut parsed.inputs {
+                input.repeats.clear();
+            }
+        }
     }
 
     // After the rows above, not before them: a file with nothing usable in it is
@@ -568,6 +660,7 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         true => None,
         false => Some(api::Client::new(
             args.delay,
+            args.concurrency,
             args.blockchain_api_key.clone(),
             ui,
         )?),
@@ -1029,8 +1122,9 @@ struct Input {
     /// Line number in the input file, so a failure below can name it.
     number: usize,
     /// Every other line that named the same secret — the duplicates this one
-    /// stood in for. Kept so that finishing with this secret takes all of its
-    /// spellings out of the input, not just the one that was scanned.
+    /// stood in for. They leave the input before the scan starts, along with the
+    /// lines that named no secret at all, and this is emptied when they do; it
+    /// is the list of what to take out, not a record kept for later.
     repeats: Vec<usize>,
     /// The line as it was written, for the output file to echo back.
     raw: String,
@@ -1230,21 +1324,11 @@ fn query(
     label: &str,
     ui: &Ui,
 ) -> Result<(HashMap<String, api::Balance>, usize), String> {
-    let batches = api::batches(addresses, batch.max(1));
-    let mut hits = HashMap::new();
-
-    let mut done = 0;
-    for chunk in &batches {
-        ui.progress(done, addresses.len(), label);
-        for (address, balance) in client.balances(chunk)? {
-            if balance.is_used() {
-                hits.insert(address, balance);
-            }
-        }
-        done += chunk.len();
-    }
+    let total = addresses.len();
+    ui.progress(0, total, label);
+    let found = client.scan(addresses, batch, |done| ui.progress(done, total, label))?;
     ui.clear();
-    Ok((hits, batches.len()))
+    Ok(found)
 }
 
 /// Query every derived address and return the balances that showed activity,
@@ -1706,7 +1790,8 @@ mod tests {
         // The rest are the defaults written out, so copying the file changes
         // nothing about how a scan behaves.
         assert_eq!(args.indices.count(), Some(10));
-        assert_eq!(args.api_batch, 1500);
+        assert_eq!(args.api_batch, api::MAX_API_BATCH);
+        assert_eq!(args.concurrency, api::DEFAULT_CONCURRENCY);
         assert_eq!(args.phrase_batch, PHRASES_PER_BATCH);
         assert_eq!(args.delay, 0);
         assert_eq!(args.passphrase, "");
@@ -1930,6 +2015,78 @@ mod tests {
         assert!(merged(&["allkeys-keycheck"], "api-batch = 0\n").is_err());
     }
 
+    /// Past 1,500 the API stops answering rather than complaining: the body
+    /// exceeds 64 KiB and comes back `200 {}`, which is the same shape as a
+    /// batch where nothing was ever used. Refused at the boundary so nobody
+    /// raises it looking for speed and gets a scan that finds less.
+    #[test]
+    fn an_api_batch_over_the_body_limit_is_refused() {
+        let over = (api::MAX_API_BATCH + 1).to_string();
+        assert!(Args::try_parse_from(["allkeys-keycheck", "--api-batch", &over]).is_err());
+        assert!(merged(&["allkeys-keycheck"], &format!("api-batch = {over}\n")).is_err());
+
+        // The maximum itself is the default, and is accepted from both sides.
+        let max = api::MAX_API_BATCH.to_string();
+        let args = Args::try_parse_from(["allkeys-keycheck", "--api-batch", &max]).unwrap();
+        assert_eq!(args.api_batch, api::MAX_API_BATCH);
+        let args = merged(&["allkeys-keycheck"], &format!("api-batch = {max}\n")).unwrap();
+        assert_eq!(args.api_batch, api::MAX_API_BATCH);
+    }
+
+    /// `--delay` is how a scan was slowed down before concurrency existed, and
+    /// it is applied per connection. Eight of them each honouring it would be
+    /// eight times the request rate the same setting used to give, so a delay
+    /// on its own still means one request at a time — otherwise upgrading would
+    /// silently undo the one control for going easy on the endpoint.
+    #[test]
+    fn a_delay_on_its_own_still_means_one_request_at_a_time() {
+        let args = merged(&["allkeys-keycheck", "--delay", "500"], "").unwrap();
+        assert_eq!(args.concurrency, 1);
+        let args = merged(&["allkeys-keycheck"], "delay = 500\n").unwrap();
+        assert_eq!(args.concurrency, 1);
+
+        // Asking for both is someone who knows what each one does.
+        let args = merged(
+            &["allkeys-keycheck", "--delay", "500", "--concurrency", "4"],
+            "",
+        )
+        .unwrap();
+        assert_eq!((args.delay, args.concurrency), (500, 4));
+        let args = merged(&["allkeys-keycheck", "--delay", "500"], "concurrency = 4\n").unwrap();
+        assert_eq!((args.delay, args.concurrency), (500, 4));
+
+        // No delay, no reason to hold anything back.
+        let args = merged(&["allkeys-keycheck"], "").unwrap();
+        assert_eq!(
+            (args.delay, args.concurrency),
+            (0, api::DEFAULT_CONCURRENCY)
+        );
+        let args = merged(&["allkeys-keycheck", "--delay", "0"], "").unwrap();
+        assert_eq!(args.concurrency, api::DEFAULT_CONCURRENCY);
+    }
+
+    /// Concurrency is bounded at both ends: no requests at all would never
+    /// finish, and a scan opening far more than was ever measured against a free
+    /// endpoint is asking to be blocked.
+    #[test]
+    fn concurrency_outside_its_range_is_refused() {
+        let over = (api::MAX_CONCURRENCY + 1).to_string();
+        assert!(Args::try_parse_from(["allkeys-keycheck", "--concurrency", "0"]).is_err());
+        assert!(Args::try_parse_from(["allkeys-keycheck", "--concurrency", &over]).is_err());
+        assert!(merged(&["allkeys-keycheck"], "concurrency = 0\n").is_err());
+        assert!(merged(&["allkeys-keycheck"], &format!("concurrency = {over}\n")).is_err());
+
+        // A flag still wins over a file that sets it, like every other option.
+        let args = merged(
+            &["allkeys-keycheck", "--concurrency", "2"],
+            "concurrency = 5\n",
+        )
+        .unwrap();
+        assert_eq!(args.concurrency, 2);
+        let args = merged(&["allkeys-keycheck"], "concurrency = 5\n").unwrap();
+        assert_eq!(args.concurrency, 5);
+    }
+
     /// A dry run contacts no network and so never uploads. It must not be held
     /// up by a token it will never spend — `upload = true` is an ordinary thing
     /// to leave in a config file, and a dry run is what you reach for before a
@@ -1975,6 +2132,46 @@ mod tests {
     fn a_step_of_zero_is_refused() {
         assert!(Args::try_parse_from(["allkeys-keycheck", "--expand", "0"]).is_err());
         assert!(merged(&["allkeys-keycheck"], "expand = 0\n").is_err());
+    }
+
+    /// A repeat holds no secret of its own — the line it repeats is still in the
+    /// file — so it is taken out before the scan starts rather than carried
+    /// until the batch that scans that secret is safely written. What must not
+    /// happen is the reverse: the first line to name a secret staying put until
+    /// its batch is done, so that an interrupted run keeps every secret it
+    /// started with.
+    #[test]
+    fn a_repeat_is_listed_apart_from_the_line_it_repeats() {
+        let raw = format!(
+            "{key}\n{PHRASE}\n0X{key}\n{key}\n",
+            key = "0".repeat(64).to_uppercase()
+        );
+        let parsed = parse_input(&raw, "", &Ui::new(true)).expect("the lines parse");
+
+        // Three spellings of one key, so one input standing on line 1 with the
+        // other two recorded as repeats — and the phrase untouched beside it.
+        assert_eq!(parsed.duplicates, 2);
+        assert_eq!(parsed.inputs.len(), 2);
+        let key = &parsed.inputs[0];
+        assert_eq!(key.number, 1);
+        assert_eq!(key.repeats, vec![3, 4]);
+
+        // The repeats are what leaves up front; the line that named the secret
+        // is not among them, and is all that `lines()` yields once they have.
+        let mut input = parse_input(&raw, "", &Ui::new(true)).expect("the lines parse");
+        let spent: Vec<usize> = input
+            .inputs
+            .iter()
+            .flat_map(|i| i.repeats.iter().copied())
+            .collect();
+        assert_eq!(spent, vec![3, 4]);
+        assert!(!spent.contains(&1) && !spent.contains(&2));
+
+        for i in &mut input.inputs {
+            i.repeats.clear();
+        }
+        let scanned: Vec<usize> = input.inputs.iter().flat_map(Input::lines).collect();
+        assert_eq!(scanned, vec![1, 2]);
     }
 
     /// A line of the given kind — 'p' for a phrase, anything else a key —

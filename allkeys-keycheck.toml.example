@@ -26,13 +26,18 @@ upload = false
 # Scan the indices count exactly, following nothing further.
 # no-expand = true
 
-# Maximum addresses per API request.
+# Maximum addresses per API request. 1500 is also the most the API will take —
+# a larger batch comes back empty rather than as an error.
 # api-batch = 1500
 
-# How many phrases to carry through the run at a time.
-# phrase-batch = 50
+# How many API requests to keep in flight at once. This is what makes a large
+# scan finish; lower it to be gentler on blockchain.info. Maximum 16.
+# concurrency = 8
 
-# Milliseconds to wait between successful API requests.
+# How many phrases to carry through the run at a time.
+# phrase-batch = 100
+
+# Milliseconds each connection waits after a successful API request.
 # delay = 0
 
 # Derive and print addresses without contacting the network.

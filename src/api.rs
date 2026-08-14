@@ -6,11 +6,20 @@
 //! an error, so an oversized batch looks exactly like "none of these addresses
 //! were ever used". Every response is therefore checked for completeness, and
 //! a short response is treated as a failure, never as an answer.
+//!
+//! A request is nearly all waiting — about 1.3s of round trip for 4 ms of
+//! parsing — so batches are looked up several at a time. The endpoint does not
+//! rate-limit this: throughput measured flat-out linear from one request in
+//! flight to eight, with no 429s and no rise in latency. The gain is entirely
+//! in the waiting, so it costs the server no more work than a serial scan of
+//! the same addresses did, spread over less time.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
+use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::ui::Ui;
@@ -19,6 +28,37 @@ const ENDPOINT: &str = "https://blockchain.info/balance";
 
 /// Server rejects bodies at 64 KiB; stay comfortably under it.
 const MAX_BODY_BYTES: usize = 56_000;
+
+/// Hard ceiling on `--api-batch`.
+///
+/// Not the wall itself: measured against the endpoint, 1,750 base58 addresses
+/// (a 64,693-byte body) are answered in full and 1,900 (70,228 bytes) come back
+/// truncated, which puts the real limit at the documented 64 KiB. This sits
+/// below that on purpose.
+///
+/// It is a ceiling rather than a default that can be raised because raising it
+/// cannot help and can quietly hurt. `MAX_BODY_BYTES` already splits a batch
+/// before it reaches the wall, so a higher count is not what decides how many
+/// addresses go in a request — and a count is a poor proxy for a body anyway,
+/// since a bech32 address is nearly twice a base58 one. Going over does not
+/// fail loudly either: the server answers `HTTP 200 {}`, the same shape as a
+/// batch where nothing was ever used, which is caught here only because every
+/// response is checked against what was asked for. Refused at the boundary so
+/// nobody reaches for it looking for speed.
+pub const MAX_API_BATCH: usize = 1_500;
+
+/// Requests in flight at once, by default.
+///
+/// Eight is the most that was measured against the live endpoint, not a limit
+/// the server publishes. It scaled cleanly to there; past it is untested, which
+/// is why `--concurrency` will not go far above it.
+pub const DEFAULT_CONCURRENCY: usize = 8;
+
+/// Ceiling on `--concurrency`. Unlike `MAX_API_BATCH` this is caution rather
+/// than a wall the server puts up: nothing was seen to break at eight, and a
+/// scan that opened hundreds of connections to a free endpoint would deserve
+/// the block it got.
+pub const MAX_CONCURRENCY: usize = 16;
 
 /// Cap on backoff between retries of a failing request.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -46,9 +86,16 @@ impl Balance {
 
 pub struct Client<'a> {
     http: reqwest::blocking::Client,
-    /// Pause between successful requests. Zero is fine for this endpoint.
+    /// Pause after a successful request, applied by the worker that made it —
+    /// so it paces each connection rather than the scan as a whole. Zero is
+    /// fine for this endpoint.
     delay: Duration,
     api_key: Option<String>,
+    /// Requests in flight at once. A pool of its own rather than rayon's
+    /// global one, which is sized to the CPU and belongs to key derivation:
+    /// these threads are asleep on a socket, and how many of those are
+    /// reasonable has nothing to do with how many cores there are.
+    pool: rayon::ThreadPool,
     ui: &'a Ui,
 }
 
@@ -78,13 +125,67 @@ pub fn batches(addresses: &[String], max_count: usize) -> Vec<&[String]> {
 }
 
 impl<'a> Client<'a> {
-    pub fn new(delay_ms: u64, api_key: Option<String>, ui: &'a Ui) -> Result<Self, String> {
+    pub fn new(
+        delay_ms: u64,
+        concurrency: usize,
+        api_key: Option<String>,
+        ui: &'a Ui,
+    ) -> Result<Self, String> {
         Ok(Self {
             http: crate::http::client()?,
             delay: Duration::from_millis(delay_ms),
             api_key,
+            pool: rayon::ThreadPoolBuilder::new()
+                .num_threads(concurrency.clamp(1, MAX_CONCURRENCY))
+                .thread_name(|i| format!("lookup-{i}"))
+                .build()
+                .map_err(|e| format!("could not start the lookup threads ({e})"))?,
             ui,
         })
+    }
+
+    /// Look up every address, several requests at a time, and return only those
+    /// with on-chain activity — along with how many requests it took.
+    ///
+    /// Filtering here rather than in the caller is what keeps memory flat now
+    /// that batches are in flight together: the addresses that were never used
+    /// are the overwhelming majority of any scan, and they are dropped as each
+    /// response lands instead of accumulating until the whole pass is done.
+    ///
+    /// `progress` is called with the running total of addresses accounted for.
+    /// It comes from several threads, so it must tolerate being called out of
+    /// order and concurrently.
+    pub fn scan(
+        &self,
+        addresses: &[String],
+        max_count: usize,
+        progress: impl Fn(usize) + Sync,
+    ) -> Result<(HashMap<String, Balance>, usize), String> {
+        let batches = batches(addresses, max_count.clamp(1, MAX_API_BATCH));
+        let done = AtomicUsize::new(0);
+
+        // `collect` into a Result short-circuits, so once one batch has given
+        // up the ones not yet started are never scheduled. The requests already
+        // in flight still finish — a retry loop cannot be interrupted from
+        // outside — so this bounds the damage rather than stopping the pass
+        // dead. Only the first error is kept, which is the one worth reading.
+        let maps: Vec<HashMap<String, Balance>> = self.pool.install(|| {
+            batches
+                .par_iter()
+                .map(|chunk| {
+                    let mut map = self.balances(chunk)?;
+                    map.retain(|_, balance| balance.is_used());
+                    progress(done.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len());
+                    Ok(map)
+                })
+                .collect::<Result<_, String>>()
+        })?;
+
+        let mut hits = HashMap::new();
+        for map in maps {
+            hits.extend(map);
+        }
+        Ok((hits, batches.len()))
     }
 
     /// Look up a batch, retrying transient failures indefinitely and splitting

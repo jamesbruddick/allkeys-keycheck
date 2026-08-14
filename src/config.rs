@@ -31,6 +31,7 @@ pub struct Config {
     pub expand: Option<u32>,
     pub no_expand: Option<bool>,
     pub api_batch: Option<usize>,
+    pub concurrency: Option<usize>,
     pub phrase_batch: Option<u64>,
     pub delay: Option<u64>,
     pub dry_run: Option<bool>,
