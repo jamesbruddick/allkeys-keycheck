@@ -68,7 +68,7 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.7.0
+  allkeys-keycheck 0.7.1
 
       scanning  keys.txt
          input  1 key · 1 duplicate removed · 1 bad line removed
@@ -102,7 +102,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.7.0
+  allkeys-keycheck 0.7.1
 
       scanning  keys.txt
          input  1 key · 1 phrase
@@ -511,23 +511,27 @@ environment variables for anyone who prefers them.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `<FILE>` | `input` in config | Text file of keys and phrases, one per line |
-| `-o, --output <FILE>` | `output` in config | Merge the findings into a file |
-| `-u, --upload` | — | Submit found keys to allkeys.directory |
-| `--found <FILE>` | `found.txt` | Ledger of everything found, and the input's skip-list |
+| **Scanning** | | |
 | `-i, --indices <INDICES>` | `10` | Which indices of each chain to scan — a count, or windows |
 | `--expand <N\|false>` | `400` | How far each expansion round reaches, or `false` to scan the count exactly |
-| `--passphrase <WORD>` | config / `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
-| `--api-batch <N>` | `1500` | Max addresses per API request — also the maximum accepted |
-| `--concurrency <N>` | `8` | API requests to keep in flight at once (max 16) |
-| `--phrase-batch <N>` | `100` | How many phrases to carry through the run at a time |
-| `--delay <MS>` | `0` | Pause each connection after a successful API request |
-| `--blockchain-api-key <KEY>` | config / `$BLOCKCHAIN_API_KEY` | blockchain.info key, raises the rate limit |
+| `-p, --passphrase <WORD>` | config / `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
+| `--dry-run` | — | Print derived addresses, contact no network |
+| **Results** | | |
+| `-o, --output <FILE>` | `output` in config | Merge the findings into a file |
+| `--found <FILE>` | `found.txt` | Ledger of everything found, and the input's skip-list |
+| `-u, --upload` | — | Submit found keys to allkeys.directory |
 | `--allkeys-api-key <KEY>` | config / `$ALLKEYS_API_KEY` | allkeys.directory key, required by `--upload` |
+| **Network** | | |
+| `-c, --concurrency <N>` | `8` | API requests to keep in flight at once (max 16) |
+| `-d, --delay <MS>` | `0` | Pause each connection after a successful API request |
+| `--api-batch <N>` | `1500` | Max addresses per API request — also the maximum accepted |
+| `--phrase-batch <N>` | `100` | How many phrases to carry through the run at a time |
+| `--blockchain-api-key <KEY>` | config / `$BLOCKCHAIN_API_KEY` | blockchain.info key, raises the rate limit |
+| **Configuration** | | |
 | `--config <FILE>` | `allkeys-keycheck.toml` | Read settings from a specific file |
 | `--init-config` | — | Write a commented `allkeys-keycheck.toml` and exit |
-| `--dry-run` | — | Print derived addresses, contact no network |
 | `-h, --help` | — | Print help — `-h` for a summary, `--help` for the detail |
-| `-V, --version` | — | Print version |
+| `-v, --version` | — | Print version |
 
 Either `-o` or `-u` is required, unless `--dry-run`. Every path here can come
 from the config file instead of the command line.

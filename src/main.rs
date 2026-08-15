@@ -70,6 +70,10 @@ ever scanned twice.";
 // rest lives in the README, which has room to explain it.
 #[command(
     version,
+    // Clap's own version flag is -V, and this replaces it with -v: the tool has
+    // no verbosity setting for -v to mean instead, and -v is what a hand
+    // reaches for. -V still works, unlisted, for anyone in the habit.
+    disable_version_flag = true,
     about = "Find which Bitcoin private keys and BIP39 mnemonic phrases have active addresses",
     long_about = "Find which Bitcoin private keys and BIP39 mnemonic phrases have active \
         addresses.\n\n\
@@ -98,6 +102,12 @@ struct Args {
 
     /// Which indices of each mnemonic chain to scan: a count, or windows
     /// like 10..110
+    //
+    // From here down every option carries a help_heading, so `--help` reads as
+    // four short lists — what to scan, where results go, how hard to push the
+    // network, and the file underneath it all — rather than one column of
+    // fifteen. Fields are ordered to match, since a heading lists its options
+    // in declaration order.
     ///
     /// A bare count scans that many indices at each end of the chain: `10`
     /// means `0..10` and the last ten. Both ends, because the index space runs
@@ -112,46 +122,14 @@ struct Args {
     // A plain placeholder, with the two forms named in the line above instead:
     // spelling the grammar out here made this the widest option in the list,
     // and the widest option sets the description column for every other one.
-    #[arg(short = 'i', long, default_value = "10", value_name = "INDICES")]
-    indices: hd::Span,
-
-    /// BIP39 passphrase, the optional 25th word
-    ///
-    /// A different passphrase turns the same phrase into an entirely different
-    /// wallet. Prefer [secrets] in the config file, or the environment
-    /// variable: a passphrase on the command line lands in your shell history
-    /// and in the process list.
     #[arg(
+        short = 'i',
         long,
-        env = "BIP39_PASSPHRASE",
-        hide_env_values = true,
-        default_value = "",
-        value_name = "WORD"
+        default_value = "10",
+        value_name = "INDICES",
+        help_heading = "Scanning"
     )]
-    passphrase: String,
-
-    /// Merge the secrets that have activity into this file
-    ///
-    /// One per line; for a mnemonic, both the child keys that hit and the
-    /// phrase itself. An existing file is merged into, never replaced, so runs
-    /// accumulate and a repeat cannot lose what an earlier one found.
-    ///
-    /// Omit it to keep no file of your own, which then needs --upload. Either
-    /// way the ledger is written. Can be set in allkeys-keycheck.toml instead.
-    #[arg(short, long, value_name = "FILE")]
-    output: Option<PathBuf>,
-
-    /// The ledger of everything ever found, and the input's skip-list
-    ///
-    /// Holds what --output holds, in the same form, but is written on every
-    /// run: it is this machine's record of what is already known to be active,
-    /// so it has to be complete.
-    ///
-    /// It is read before every scan too. A key or phrase already in here has
-    /// been answered, so it leaves the input rather than being looked up a
-    /// second time.
-    #[arg(long, default_value = "found.txt", value_name = "FILE")]
-    found: PathBuf,
+    indices: hd::Span,
 
     /// How far each expansion round reaches in indices, or false to not expand
     ///
@@ -164,8 +142,110 @@ struct Args {
     /// large wordlist that one busy phrase cannot prolong.
     ///
     /// Applies to a count --indices only. Explicit windows never expand.
-    #[arg(long, default_value_t, value_name = "N|false")]
+    #[arg(
+        long,
+        default_value_t,
+        value_name = "N|false",
+        help_heading = "Scanning"
+    )]
     expand: config::Expand,
+
+    /// BIP39 passphrase, the optional 25th word
+    ///
+    /// A different passphrase turns the same phrase into an entirely different
+    /// wallet. Prefer [secrets] in the config file, or the environment
+    /// variable: a passphrase on the command line lands in your shell history
+    /// and in the process list.
+    #[arg(
+        short,
+        long,
+        env = "BIP39_PASSPHRASE",
+        hide_env_values = true,
+        default_value = "",
+        value_name = "WORD",
+        help_heading = "Scanning"
+    )]
+    passphrase: String,
+
+    /// Derive and print addresses without contacting the network
+    #[arg(long, help_heading = "Scanning")]
+    dry_run: bool,
+
+    /// Merge the secrets that have activity into this file
+    ///
+    /// One per line; for a mnemonic, both the child keys that hit and the
+    /// phrase itself. An existing file is merged into, never replaced, so runs
+    /// accumulate and a repeat cannot lose what an earlier one found.
+    ///
+    /// Omit it to keep no file of your own, which then needs --upload. Either
+    /// way the ledger is written. Can be set in allkeys-keycheck.toml instead.
+    #[arg(short, long, value_name = "FILE", help_heading = "Results")]
+    output: Option<PathBuf>,
+
+    /// The ledger of everything ever found, and the input's skip-list
+    ///
+    /// Holds what --output holds, in the same form, but is written on every
+    /// run: it is this machine's record of what is already known to be active,
+    /// so it has to be complete.
+    ///
+    /// It is read before every scan too. A key or phrase already in here has
+    /// been answered, so it leaves the input rather than being looked up a
+    /// second time.
+    #[arg(
+        long,
+        default_value = "found.txt",
+        value_name = "FILE",
+        help_heading = "Results"
+    )]
+    found: PathBuf,
+
+    /// Submit the keys that were found to allkeys.directory
+    ///
+    /// This sends private keys off this machine and cannot be undone, so it
+    /// never happens unless you pass the flag. Only secrets with confirmed
+    /// on-chain activity are ever sent.
+    #[arg(short, long, help_heading = "Results")]
+    upload: bool,
+
+    /// API key for allkeys.directory, required by --upload
+    #[arg(
+        long,
+        env = "ALLKEYS_API_KEY",
+        hide_env_values = true,
+        value_name = "KEY",
+        help_heading = "Results"
+    )]
+    allkeys_api_key: Option<String>,
+
+    /// How many API requests to keep in flight at once
+    ///
+    /// A lookup is almost entirely waiting on the network, so several at a time
+    /// is most of what makes a large scan finish: eight together move roughly
+    /// five times the addresses one at a time does.
+    ///
+    /// Lower it to be gentler on blockchain.info, or if a flaky connection is
+    /// happier with one request at a time. It changes only how fast a scan
+    /// goes, never what it finds.
+    #[arg(
+        short,
+        long,
+        default_value_t = api::DEFAULT_CONCURRENCY,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new()
+            .range(1..=api::MAX_CONCURRENCY as u64),
+        value_name = "N",
+        help_heading = "Network"
+    )]
+    concurrency: usize,
+
+    /// Milliseconds to wait between successful API requests
+    #[arg(
+        short,
+        long,
+        default_value_t = 0,
+        value_name = "MS",
+        help_heading = "Network"
+    )]
+    delay: u64,
 
     /// Maximum addresses per API request
     ///
@@ -184,27 +264,10 @@ struct Args {
         // sizes below anyway.
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new()
             .range(1..=api::MAX_API_BATCH as u64),
-        value_name = "N"
+        value_name = "N",
+        help_heading = "Network"
     )]
     api_batch: usize,
-
-    /// How many API requests to keep in flight at once
-    ///
-    /// A lookup is almost entirely waiting on the network, so several at a time
-    /// is most of what makes a large scan finish: eight together move roughly
-    /// five times the addresses one at a time does.
-    ///
-    /// Lower it to be gentler on blockchain.info, or if a flaky connection is
-    /// happier with one request at a time. It changes only how fast a scan
-    /// goes, never what it finds.
-    #[arg(
-        long,
-        default_value_t = api::DEFAULT_CONCURRENCY,
-        value_parser = clap::builder::RangedU64ValueParser::<usize>::new()
-            .range(1..=api::MAX_CONCURRENCY as u64),
-        value_name = "N"
-    )]
-    concurrency: usize,
 
     /// How many phrases to carry through the run at a time
     ///
@@ -218,13 +281,10 @@ struct Args {
         long,
         default_value_t = PHRASES_PER_BATCH,
         value_parser = clap::value_parser!(u64).range(1..),
-        value_name = "N"
+        value_name = "N",
+        help_heading = "Network"
     )]
     phrase_batch: u64,
-
-    /// Milliseconds to wait between successful API requests
-    #[arg(long, default_value_t = 0, value_name = "MS")]
-    delay: u64,
 
     /// blockchain.info API key, if you have one (raises the rate limit)
     // hide_env_values: clap prints an env var's CURRENT VALUE in --help, which
@@ -233,45 +293,31 @@ struct Args {
         long,
         env = "BLOCKCHAIN_API_KEY",
         hide_env_values = true,
-        value_name = "KEY"
+        value_name = "KEY",
+        help_heading = "Network"
     )]
     blockchain_api_key: Option<String>,
-
-    /// Submit the keys that were found to allkeys.directory
-    ///
-    /// This sends private keys off this machine and cannot be undone, so it
-    /// never happens unless you pass the flag. Only secrets with confirmed
-    /// on-chain activity are ever sent.
-    #[arg(short, long)]
-    upload: bool,
-
-    /// API key for allkeys.directory, required by --upload
-    #[arg(
-        long,
-        env = "ALLKEYS_API_KEY",
-        hide_env_values = true,
-        value_name = "KEY"
-    )]
-    allkeys_api_key: Option<String>,
 
     /// Read settings from this file instead of ./allkeys-keycheck.toml
     ///
     /// The file is the weakest layer: anything given on the command line, or
     /// in the environment, wins over it. Naming a file that does not exist is
     /// an error; simply having no config file is not.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", help_heading = "Configuration")]
     config: Option<PathBuf>,
 
     /// Write a commented allkeys-keycheck.toml and exit
     ///
     /// Every setting, explained. Created readable only by you, since it is
     /// where your API keys go. An existing file is never overwritten.
-    #[arg(long)]
+    #[arg(long, help_heading = "Configuration")]
     init_config: bool,
 
-    /// Derive and print addresses without contacting the network
-    #[arg(long)]
-    dry_run: bool,
+    /// Print version
+    // Never read: the action prints and exits during parsing. The field exists
+    // because the derive needs somewhere to hang the argument.
+    #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
 }
 
 fn main() -> ExitCode {
