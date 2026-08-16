@@ -68,15 +68,14 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.7.1
+  allkeys-keycheck 0.7.2
 
-      scanning  keys.txt
-         input  1 key · 1 duplicate removed · 1 bad line removed
+         found  0 on file
+      scanning  keys.txt · 1 key · 1 duplicate removed · 1 bad line removed
                 line 3: not a 32-byte hex key or a BIP39 phrase
         lookup  blockchain.info · 5 addresses · 1 request · 0.4s
-         found  1 of 1 key used
-                5 addresses with history · no balances
-       written  active-keys.txt · 1 on file · 1 new
+         found  1 of 1 key active · 1 new · 1 on file
+                5 addresses with activity · 0 addresses with balance
                 not uploaded — pass -u to submit these to allkeys.directory
        drained  keys.txt · 2 lines left
 ```
@@ -102,10 +101,10 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.7.1
+  allkeys-keycheck 0.7.2
 
-      scanning  keys.txt
-         input  1 key · 1 phrase
+         found  0 on file
+      scanning  keys.txt · 1 key · 1 phrase
 
          batch  1 key
 
@@ -160,7 +159,7 @@ rather than as a bad hex key. Lines that are neither are named — the first few
 by line number, then a count — and taken out before the scan starts:
 
 ```
-         input  2 keys · 3 bad lines removed
+      scanning  keys.txt · 2 keys · 3 bad lines removed
                 line 2: 3 words: a mnemonic has 12, 15, 18, 21 or 24
                 line 7: not a 32-byte hex key or a BIP39 phrase
 ```
@@ -213,13 +212,11 @@ way, derived, queried, expanded, written and uploaded, before the next starts:
 ```
          batch  100 keys
         lookup  blockchain.info · 500 addresses · 1 request · 0.4s
-         found  3 of 100 keys used
-       written  active-keys.txt · 3 on file · 3 new
+         found  3 of 100 keys active · 3 new · 3 on file
 
          batch  1 of 19 · 100 phrases
         lookup  blockchain.info · 80,000 addresses · 54 requests · 12.4s
-         found  2 of 100 phrases used
-       written  active-keys.txt · 5 on file · 2 new
+         found  2 of 100 phrases active · 2 new · 5 on file
 
          batch  2 of 19 · 100 phrases
         ...
@@ -291,12 +288,21 @@ is read and merged into, never replaced:
   by word count and alphabetical within each group. It reads the same however
   many runs it took to build, so a diff shows only what was added.
 
-The summary reports the file's running total first and this run's contribution
-second, because "3 new" against a file of 300 means something very different
+What each batch found leads the row, and what the ledger did with it follows
+in grey — this batch's contribution first, then the running total it is news
+against, because "3 new" against a file of 300 means something very different
 from "3 new" against an empty one:
 
 ```
-       written  active-keys.txt · 412 on file · 3 new · 1 extended
+         found  3 of 100 keys active · 3 new · 1 extended · 412 on file
+```
+
+The ledger is also folded and sorted at the start of every run, before the
+input is read against it, so two files merged together by hand come back
+deduped on the next run:
+
+```
+         found  412 on file · 2 duplicates removed
 ```
 
 A file that exists but cannot be read aborts the run rather than being

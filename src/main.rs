@@ -538,8 +538,6 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     if let Some(path) = config_file {
         ui.row("config", &path.display().to_string());
     }
-    ui.row("scanning", &input.display().to_string());
-
     // A scan whose results go nowhere is almost always a mistake, so it is
     // refused up front. --dry-run is exempt: it runs no scan, and already says
     // where its output goes.
@@ -559,8 +557,10 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     let upload_token = upload_token(args)?;
 
     // Read before the input is, because it decides what the input is worth:
-    // what is on file here will not be looked up again.
-    let ledger = outfile::identities(&outfile::load(&args.found)?);
+    // what is on file here will not be looked up again. Reported before it too,
+    // so the rows read in the order the run actually works in — the file it
+    // remembers, then the file it is about to read against it.
+    let ledger = open_ledger(args, ui)?;
 
     let text = fs::read_to_string(input)
         .map_err(|e| format!("could not read {}: {e}", input.display()))?;
@@ -576,7 +576,10 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     let count = parsed.inputs.len();
 
     // Related figures share one line, separated by a middot, so the run reads
-    // as a handful of rows rather than a column of one-fact lines.
+    // as a handful of rows rather than a column of one-fact lines. The file's
+    // name leads them: naming it on a row of its own said one thing and then
+    // waited for the parse to say what was in it, and the two only ever read as
+    // one sentence.
     //
     // Both kinds are named in the value rather than one of them in the label:
     // the two are scanned differently — keys in a single pass, phrases in
@@ -640,7 +643,12 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
             }
         ));
     }
-    ui.row("input", &facts.join(&ui.dim(" · ")));
+    // The file's name and its contents are both the row's substance, so both
+    // stay bright and only the middots between them are dimmed — unlike the
+    // `found` rows, where the file's bookkeeping really is an aside.
+    let mut row = vec![input.display().to_string()];
+    row.append(&mut facts);
+    ui.row("scanning", &row.join(&ui.dim(" · ")));
 
     // Only a sample: a file with thousands of bad lines would otherwise push
     // the results off the screen entirely.
@@ -705,10 +713,9 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         // run, not a failure: the input held real secrets, and the answer for
         // every one of them was already on file.
         if already > 0 {
-            ui.row(
-                "done",
-                &format!("everything left was already in {}", args.found.display()),
-            );
+            // Nothing more to say: the `found` row above already reported the
+            // file this input turned out to be entirely contained by, and it
+            // was folded and sorted on the way to reporting it.
             println!();
             return Ok(());
         }
@@ -1662,11 +1669,16 @@ type FundedKey<'a> = (&'a KeyEntry, Vec<FundedAddress<'a>>);
 /// Everything else is a count; a key still holding coins is the one result
 /// worth spelling out, so those get the key, the address and the amount.
 ///
-/// `history` is the line naming how many addresses were used, which this prints
+/// `activity` is the line naming how many addresses were used, which this prints
 /// rather than the caller: when nothing is still funded, "no remaining balance"
 /// is the rest of that sentence rather than a finding of its own, and the two
 /// belong on one line.
-fn show_funded(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>, history: &str, ui: &Ui) {
+fn show_funded(
+    active: &[&KeyEntry],
+    hits: &HashMap<String, api::Balance>,
+    activity: &str,
+    ui: &Ui,
+) {
     // Grouped by key, so a key funded on several address types prints its hex
     // once rather than once per address.
     let funded: Vec<FundedKey> = active
@@ -1686,11 +1698,14 @@ fn show_funded(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>, histo
         .collect();
 
     if funded.is_empty() {
-        ui.cont(&format!("{history}{}", ui.dim(" · no balances")));
+        ui.cont(&format!(
+            "{activity}{}",
+            ui.dim(" · 0 addresses with balance")
+        ));
         return;
     }
 
-    ui.cont(history);
+    ui.cont(activity);
 
     let total: u64 = funded
         .iter()
@@ -1788,6 +1803,60 @@ fn findings(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>) -> Findi
     found
 }
 
+/// Read the ledger, tidy it, report it, and hand back what it holds.
+///
+/// Merging an empty run into the file folds it onto itself and sorts it — the
+/// same pass a run that found something would put it through — so a file edited
+/// by hand between runs, two machines' findings pasted together, comes back
+/// deduped and in order at the start of the next run rather than at the end of
+/// one that happens to find something.
+///
+/// The row comes before the input's, because this is the file the input is
+/// about to be judged against: what is already here is what will not be looked
+/// up again.
+fn open_ledger(args: &Args, ui: &Ui) -> Result<HashSet<String>, String> {
+    let merged = outfile::merge(outfile::load(&args.found)?, Vec::new());
+    // --dry-run reports what a real run would do without doing it, and
+    // rewriting the file is doing it.
+    if !args.dry_run {
+        outfile::save(&args.found, &merged.records)?;
+    }
+
+    let mut aside = Vec::new();
+    if merged.folded > 0 {
+        aside.push(removed(&merged, args.dry_run));
+    }
+    let total = format!("{} on file", ui::commas(merged.secrets() as u64));
+    ui.row("found", &with_aside(total, &aside, ui));
+
+    Ok(outfile::identities(&merged.records))
+}
+
+/// A row's headline with its bookkeeping trailing behind it, dimmed.
+///
+/// What the run found is what the row is for and stays bright; what the file
+/// did with it afterwards is an aside, and reads as one — so a row scanned at
+/// arm's length gives up its result before its detail.
+fn with_aside(headline: String, aside: &[String], ui: &Ui) -> String {
+    match aside.is_empty() {
+        true => headline,
+        false => format!("{headline}{}", ui.dim(&format!(" · {}", aside.join(" · ")))),
+    }
+}
+
+/// How a merge's folding reads in a row: "2 duplicates removed".
+fn removed(merged: &outfile::Merged, dry_run: bool) -> String {
+    format!(
+        "{} duplicate{} {}",
+        ui::commas(merged.folded as u64),
+        plural(merged.folded),
+        match dry_run {
+            true => "collapsed",
+            false => "removed",
+        }
+    )
+}
+
 fn write_results(
     entries: &[KeyEntry],
     hits: &HashMap<String, api::Balance>,
@@ -1822,61 +1891,66 @@ fn write_results(
         written.push((path, result));
     }
 
-    if active.is_empty() {
-        ui.row(
-            "found",
-            &format!(
-                "none of {} {} used",
-                ui::commas(entries.len() as u64),
-                noun(entries, entries.len())
-            ),
-        );
-    } else {
-        ui.row_good(
-            "found",
-            &format!(
-                "{} of {} {} used",
-                ui::commas(active.len() as u64),
-                ui::commas(entries.len() as u64),
-                noun(entries, entries.len())
-            ),
-        );
-        let history = format!(
-            "{} address{} with history",
-            ui::commas(hits.len() as u64),
-            if hits.len() == 1 { "" } else { "es" }
-        );
-        show_funded(&active, hits, &history, ui);
-    }
+    // What this batch turned up, and what the ledger holds now that it is in:
+    // one row rather than two, because the second was the same sentence
+    // finished — what was found, and where it went.
+    //
+    // Always the ledger's figures, never an output file's. It is the file every
+    // run writes and the one that carries from run to run, so its total is the
+    // run's total; an output file is written the same records in the same
+    // merge, and would only say the same thing twice.
+    let headline = match active.is_empty() {
+        true => format!(
+            "none of {} {} active",
+            ui::commas(entries.len() as u64),
+            noun(entries, entries.len())
+        ),
+        false => format!(
+            "{} of {} {} active",
+            ui::commas(active.len() as u64),
+            ui::commas(entries.len() as u64),
+            noun(entries, entries.len())
+        ),
+    };
 
-    // Only the file that was asked for. The ledger is written on every run and
-    // holds the same list, so a row for it would be a second line saying what
-    // the first one already said, on every batch of every scan.
-    for (path, merged) in written
+    // What this batch put into the file first, its running total after: the new
+    // ones are this batch's news, and the total is the standing figure they are
+    // news against. "Nothing new" is left to the headline when there was nothing
+    // to be new: a batch with none of its keys active has already said so.
+    let mut aside = Vec::new();
+    if let Some((_, merged)) = written
         .iter()
-        .filter(|(path, _)| Some(*path) == args.output.as_deref())
+        .find(|(path, _)| *path == args.found.as_path())
     {
-        // The file is cumulative, so its total is the headline and this run's
-        // contribution is the detail — "3 new" against a file of 300 is a very
-        // different result from "3 new" against an empty one.
-        let mut facts = vec![format!("{} on file", ui::commas(merged.secrets() as u64))];
         if merged.added > 0 {
-            facts.push(format!("{} new", ui::commas(merged.added as u64)));
+            aside.push(format!("{} new", ui::commas(merged.added as u64)));
         }
         if merged.updated > 0 {
-            facts.push(format!("{} extended", ui::commas(merged.updated as u64)));
+            aside.push(format!("{} extended", ui::commas(merged.updated as u64)));
         }
-        if merged.added == 0 && merged.updated == 0 {
-            facts.push("nothing new".to_string());
+        if !active.is_empty() && merged.added == 0 && merged.updated == 0 {
+            aside.push("nothing new".to_string());
         }
-        ui.row(
-            "written",
-            &format!(
-                "{} {}",
-                path.display(),
-                ui.dim(&format!("· {}", facts.join(" · ")))
-            ),
-        );
+        aside.push(format!("{} on file", ui::commas(merged.secrets() as u64)));
+        if merged.folded > 0 {
+            aside.push(removed(merged, args.dry_run));
+        }
+    }
+
+    // Coloured here rather than by `row_good`, which would tint the aside along
+    // with the headline: the good news is the count of active secrets, and the
+    // file's bookkeeping behind it stays the grey every other row's detail is.
+    match active.is_empty() {
+        true => ui.row("found", &with_aside(headline, &aside, ui)),
+        false => {
+            ui.row("found", &with_aside(ui.brand(&headline), &aside, ui));
+            let activity = format!(
+                "{} address{} with activity",
+                ui::commas(hits.len() as u64),
+                if hits.len() == 1 { "" } else { "es" }
+            );
+            show_funded(&active, hits, &activity, ui);
+        }
     }
     Ok(found.keys)
 }

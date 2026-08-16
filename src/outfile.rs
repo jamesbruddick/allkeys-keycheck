@@ -39,6 +39,9 @@ pub struct Merged {
     pub updated: usize,
     /// Secrets already on file with nothing new to say about them.
     pub unchanged: usize,
+    /// Copies the file already held of a secret it also held earlier, folded
+    /// into that first copy and dropped.
+    pub folded: usize,
 }
 
 impl Merged {
@@ -162,25 +165,73 @@ fn order(record: &Record) -> (u8, usize, String) {
     }
 }
 
+/// Give a record every comment from another naming the same secret, and say
+/// whether that taught it anything it did not already say.
+///
+/// Notes are added, never replaced: the line on file is the one that stays, and
+/// a second copy of a secret can only ever contribute to it.
+fn absorb(known: &mut Record, comments: Vec<String>) -> bool {
+    let before = known.comments.len();
+    for comment in comments {
+        if !known.comments.contains(&comment) {
+            known.comments.push(comment);
+        }
+    }
+    known.comments.len() > before
+}
+
+/// Collapse records naming the same secret into the first of them, and index
+/// what remains by identity.
+///
+/// Merging alone cannot do this: it compares *incoming* records against the
+/// file, so two copies that arrive together — one file's findings pasted onto
+/// the end of another's, the usual way of merging two machines' results — are
+/// both already "existing" and never meet. So the file is folded onto itself
+/// first, and the later copy hands its notes to the first and goes.
+fn fold(records: Vec<Record>) -> (Vec<Record>, HashMap<String, usize>, usize) {
+    let mut kept: Vec<Record> = Vec::with_capacity(records.len());
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut folded = 0;
+
+    for record in records {
+        // Trailing comments name no secret, so there is no such thing as two
+        // copies of one: they are kept as they are, all of them.
+        if record.is_dangling() {
+            kept.push(record);
+            continue;
+        }
+        match index.get(&identity(&record.line)) {
+            Some(&position) => {
+                absorb(&mut kept[position], record.comments);
+                folded += 1;
+            }
+            None => {
+                index.insert(identity(&record.line), kept.len());
+                kept.push(record);
+            }
+        }
+    }
+    (kept, index, folded)
+}
+
 /// Fold new findings into what the file already holds.
 ///
 /// A secret already present is never rewritten, only extended with any comments
 /// the earlier run had not recorded. The result is sorted by key, so the file
 /// reads the same however many runs it took to build and a diff between two
 /// versions of it shows only what was actually added.
+///
+/// Duplicates the file itself arrived with are folded away in the same pass, so
+/// a file edited by hand comes back tidy on the next run rather than keeping
+/// whatever was pasted into it forever.
 pub fn merge(existing: Vec<Record>, incoming: Vec<Record>) -> Merged {
-    let mut records = existing;
-    let mut index: HashMap<String, usize> = HashMap::new();
-    for (position, record) in records.iter().enumerate() {
-        if !record.is_dangling() {
-            index.entry(identity(&record.line)).or_insert(position);
-        }
-    }
+    let (mut records, mut index, folded) = fold(existing);
 
     let mut merged = Merged {
         added: 0,
         updated: 0,
         unchanged: 0,
+        folded,
         records: Vec::new(),
     };
 
@@ -189,20 +240,10 @@ pub fn merge(existing: Vec<Record>, incoming: Vec<Record>) -> Merged {
             continue;
         }
         match index.get(&identity(&record.line)) {
-            Some(&position) => {
-                let known = &mut records[position];
-                let before = known.comments.len();
-                for comment in record.comments {
-                    if !known.comments.contains(&comment) {
-                        known.comments.push(comment);
-                    }
-                }
-                if known.comments.len() > before {
-                    merged.updated += 1;
-                } else {
-                    merged.unchanged += 1;
-                }
-            }
+            Some(&position) => match absorb(&mut records[position], record.comments) {
+                true => merged.updated += 1,
+                false => merged.unchanged += 1,
+            },
             None => {
                 index.insert(identity(&record.line), records.len());
                 records.push(record);
@@ -320,6 +361,43 @@ mod tests {
         assert_eq!(
             render(&second.records),
             format!("# found 2026-08-08\n# swept\n{PHRASE}\n")
+        );
+    }
+
+    #[test]
+    fn two_files_pasted_together_come_back_deduped() {
+        // What merging two machines' results by hand looks like: one file's
+        // lines on the end of another's, the shared secrets spelled however
+        // each file happened to spell them, and nothing new to scan.
+        let pasted = parse(&format!(
+            "{KEY}\n# from the laptop\n{PHRASE}\n0x{}\n{}\n",
+            KEY.to_ascii_uppercase(),
+            PHRASE.to_uppercase()
+        ));
+        assert_eq!(pasted.len(), 4);
+
+        let merged = merge(pasted, Vec::new());
+        assert_eq!((merged.folded, merged.added), (2, 0));
+        assert_eq!(merged.secrets(), 2);
+        // The first spelling of each is the one that stays, and the note the
+        // second copy carried comes with it.
+        assert_eq!(
+            render(&merged.records),
+            format!("{KEY}\n# from the laptop\n{PHRASE}\n")
+        );
+    }
+
+    #[test]
+    fn a_hand_edit_is_folded_and_sorted_by_the_next_run() {
+        let high = format!("{}e", "f".repeat(63));
+        // Pasted on the end, out of order, and repeating what is already there.
+        let existing = parse(&format!("{high}\n{PHRASE}\n{KEY}\n{high}\n"));
+        let merged = merge(existing, vec![record(PHRASE, &["# m/84'/0'/0'/0/0"])]);
+
+        assert_eq!((merged.folded, merged.added, merged.updated), (1, 0, 1));
+        assert_eq!(
+            render(&merged.records),
+            format!("{KEY}\n{high}\n# m/84'/0'/0'/0/0\n{PHRASE}\n")
         );
     }
 
