@@ -1660,6 +1660,29 @@ fn expand_with(
     Ok(())
 }
 
+/// How many words of a found phrase go on one line.
+///
+/// A 24-word mnemonic printed whole runs off the right of a normal terminal and
+/// wraps wherever the width happens to fall, breaking mid-word. Six to a line is
+/// how a phrase is written down anyway — two rows for 12 words, four for 24 —
+/// so the split reads as the phrase's own shape rather than as damage.
+const PHRASE_WORDS_PER_LINE: usize = 6;
+
+/// The lines naming one funded entry: a key is its hex, a phrase is its words
+/// in rows of six.
+fn entry_lines(entry: &KeyEntry) -> Vec<String> {
+    if !entry.is_phrase() {
+        return vec![entry.display.clone()];
+    }
+    entry
+        .display
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .chunks(PHRASE_WORDS_PER_LINE)
+        .map(|words| words.join(" "))
+        .collect()
+}
+
 /// An address still holding coins: its label, the address, balance in satoshis.
 type FundedAddress<'a> = (String, &'a str, u64);
 
@@ -1725,7 +1748,9 @@ fn show_funded(
         if index > 0 {
             ui.gap();
         }
-        ui.cont(&entry.display);
+        for line in entry_lines(entry) {
+            ui.cont(&line);
+        }
         let width = label_width(rows.iter().map(|(label, _, _)| label.len()));
         for (label, address, sats) in rows {
             ui.detail(&format!(
@@ -2557,5 +2582,30 @@ mod tests {
 
         assert!(Args::try_parse_from(["allkeys-keycheck", "--no-expand"]).is_err());
         assert!(Args::try_parse_from(["allkeys-keycheck", "--no-color"]).is_err());
+    }
+
+    /// A funded phrase is printed six words to a line — four lines for 24
+    /// words, two for 12 — so it stays inside the terminal instead of wrapping
+    /// wherever the width lands. A key is one line however long its hex is.
+    #[test]
+    fn a_funded_phrase_prints_six_words_to_a_line() {
+        let entry = |display: &str, source| KeyEntry {
+            raw: display.to_string(),
+            display: display.to_string(),
+            source,
+            addresses: Vec::new(),
+        };
+
+        let words: Vec<String> = (0..24).map(|i| format!("w{i}")).collect();
+        for count in [12, 24] {
+            let phrase = words[..count].join(" ");
+            let lines = entry_lines(&entry(&phrase, keys::Source::Mnemonic { words: count }));
+            assert_eq!(lines.len(), count / 6);
+            assert!(lines.iter().all(|l| l.split_whitespace().count() == 6));
+            assert_eq!(lines.join(" "), phrase, "the phrase is split, not altered");
+        }
+
+        let hex = "ab".repeat(32);
+        assert_eq!(entry_lines(&entry(&hex, keys::Source::Hex)), vec![hex]);
     }
 }
