@@ -68,11 +68,12 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.7.2
+  allkeys-keycheck 0.7.3
 
          found  0 on file
       scanning  keys.txt · 1 key · 1 duplicate removed · 1 bad line removed
                 line 3: not a 32-byte hex key or a BIP39 phrase
+                written to rejected.txt · 1 on file
         lookup  blockchain.info · 5 addresses · 1 request · 0.4s
          found  1 of 1 key active · 1 new · 1 on file
                 5 addresses with activity · 0 addresses with balance
@@ -80,13 +81,15 @@ Then point the tool at it, and say where the results should go:
        drained  keys.txt · 2 lines left
 ```
 
-Three things to know before your first real run:
+Four things to know before your first real run:
 
 - **A run needs somewhere to put its results** — `-o`, `-u`, or both. Passing
   neither is refused before any work starts.
-- **Everything found also goes to `found.txt`**, the ledger, whichever of those
-  you passed. The next run's input is filtered against it, so nothing is ever
-  scanned twice. See [The ledger](#the-ledger).
+- **Everything found also goes to `accepted.txt`**, the ledger, whichever of
+  those you passed. The next run's input is filtered against it, so nothing is
+  ever scanned twice. See [The ledger](#the-ledger).
+- **Lines that named no secret go to `rejected.txt`**, one per line, before
+  they leave the input. See [The rejected file](#the-rejected-file).
 - **The input file is a queue.** Scanned lines leave it as each batch finishes.
   See [The input file is a queue](#the-input-file-is-a-queue).
 
@@ -101,7 +104,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.7.2
+  allkeys-keycheck 0.7.3
 
          found  0 on file
       scanning  keys.txt · 1 key · 1 phrase
@@ -162,7 +165,11 @@ by line number, then a count — and taken out before the scan starts:
       scanning  keys.txt · 2 keys · 3 bad lines removed
                 line 2: 3 words: a mnemonic has 12, 15, 18, 21 or 24
                 line 7: not a 32-byte hex key or a BIP39 phrase
+                written to rejected.txt · 3 on file
 ```
+
+They are not thrown away. Every one of them is written to `rejected.txt` first —
+see [The rejected file](#the-rejected-file).
 
 ### The input file is a queue
 
@@ -177,10 +184,11 @@ holds exactly what is still to do:
 - **Bad lines, duplicates, and secrets already in the ledger go first**, before
   the scan starts. None of them will ever be scanned in its own right, so
   leaving them would mean every future run reading and stepping over them again.
-  Bad lines are named on screen; the rest are counted:
+  Bad lines are written to `rejected.txt` before they go, so the rule above
+  holds for them too; they are then named on screen, and the rest are counted:
 
   ```
-           input  4 keys · 1 duplicate removed · 12 already found removed
+        scanning  keys.txt · 4 keys · 1 duplicate removed · 12 already found removed
   ```
 
   If that clears the input entirely, the run says so and stops without a single
@@ -255,12 +263,12 @@ still holding coins is spelled out in full, with the address and the amount.
 
 ### The ledger
 
-Everything found goes into `found.txt` — the ledger — on every run. It is the
+Everything found goes into `accepted.txt` — the ledger — on every run. It is the
 record of what this machine has established is active, and it is what the next
 run's input is filtered against, so it has to be complete: a memory you can
 forget to ask for would leave the same wordlist slice being rescanned forever.
 It is kept quietly: the `written` row reports the `-o` file, which holds the
-same list. `--found`, or `found = "..."` in the config, moves the ledger.
+same list. `--accepted`, or `accepted = "..."` in the config, moves the ledger.
 
 It is a memory, not a destination, so it does not satisfy the rule that a run
 needs one. `-o` writes the findings to a file you name and keep; `-u` submits
@@ -308,6 +316,34 @@ deduped on the next run:
 A file that exists but cannot be read aborts the run rather than being
 overwritten. That failure mode is the one this design exists to prevent.
 
+### The rejected file
+
+The lines that named neither a key nor a phrase go into `rejected.txt` — one per
+line, nothing else, in the same order the ledger uses:
+
+```
+0xZZ
+abandon abandon abandon
+```
+
+Why each was rejected is said on screen, against the line number it was on, not
+written into the file. The file is the lines themselves, so it can be fixed up
+and fed straight back in.
+
+They are written there **before** they leave the input, which is the same rule
+every other line is held to: nothing leaves the queue until it is safely
+somewhere else. A bad line is usually a typo — a word misspelled, a word
+missing, a digit dropped — and that is exactly the line worth keeping, so it is
+moved rather than deleted.
+
+The file accumulates and dedupes like the ledger: two spellings of the same bad
+line are one entry, a re-run adds nothing, and any comment you add by hand
+travels with the line it sits above. `--rejected`, or `rejected = "..."` in the
+config, moves it.
+
+`--dry-run` writes nothing here, and takes nothing out of the input, so the same
+lines are still there to be written by the run that follows.
+
 ## Address formats
 
 Every key is checked under all five encodings, covering every era of wallet
@@ -331,10 +367,10 @@ layouts, on both chains:
 
 | Branch | Layout |
 | --- | --- |
-| `m/44'/0'/0'/{0,1}/i` | BIP44 |
-| `m/49'/0'/0'/{0,1}/i` | BIP49 |
-| `m/84'/0'/0'/{0,1}/i` | BIP84 |
-| `m/86'/0'/0'/{0,1}/i` | BIP86 |
+| `m/44'/0'/a'/{0,1}/i` | BIP44 |
+| `m/49'/0'/a'/{0,1}/i` | BIP49 |
+| `m/84'/0'/a'/{0,1}/i` | BIP84 |
+| `m/86'/0'/a'/{0,1}/i` | BIP86 |
 
 `/0` is the receive chain and `/1` the change chain. Change is included because
 wallets hand those addresses out without ever showing them, so a phrase can
@@ -346,8 +382,39 @@ what that key can receive at is a separate question — and a wallet that derive
 under one purpose while paying to another format is exactly the mistake that
 strands coins where a purpose-bound scan will never look.
 
-At the defaults that is **800 addresses per phrase** — 4 layouts × 2 chains ×
-20 indices × 5 encodings. Under one request, and about 2 ms of key derivation.
+At the defaults that is **8,000 addresses per phrase** — 10 accounts × 4 layouts
+× 2 chains × 20 indices × 5 encodings. About 20 ms of key derivation.
+
+### Choosing accounts with `--accounts`
+
+`a` is the account, and a seed holds a separate wallet at every one of them.
+Most people only ever have account 0, but any hardware wallet will make you a
+second on request, and a scan that never looks past the first misses the whole
+of it.
+
+Every account `--accounts` reaches is walked **exactly as account 0 is** — the
+full `--indices` span, both ends, all eight branches, all five encodings.
+Nothing about account 0 says whether a second wallet was ever made from the same
+seed, so nothing about account 0 decides how hard the others are looked at.
+
+That makes the account axis **linear**:
+
+| `--accounts` | Addresses per phrase, at `-i 10` |
+| --- | --- |
+| `1` | 800 — account 0 alone |
+| `10` (default) | 8,000 |
+| `50` | 40,000 |
+
+The default reaches account 9 because an account nobody looked at is a **whole
+wallet missed**, where a few unscanned indices are only the tail of one. That is
+worth ten times the addresses on a file of phrases you care about. It is not
+always worth it on a wordlist of millions, where the per-phrase cost is what
+decides whether the run finishes at all — `--accounts 1` is the cheap pass, and
+scans exactly what the tool scanned before accounts existed.
+
+Each account is then **followed on its own evidence** — see
+[expansion](#expansion). A phrase with a busy account 0 and an untouched account
+2 grows the one and leaves the other exactly where the opening pass left it.
 
 ### Choosing indices with `--indices`
 
@@ -365,7 +432,7 @@ can sit anywhere in the space:
 | `10` | `0..10` and `2147483638..2147483648` (the default) |
 | `10..110` | 100 indices, starting ten ahead of the usual start |
 | `2147483548..2147483638` | the last 100 minus the final 10 |
-| `0..100,2147483548..` | the default shorthand, written out |
+| `0..10,2147483638..` | the default shorthand, written out |
 | `400000..500000` | one shard of a scan too big for a single pass |
 | `..` | the entire index space, all 2³¹ of it per chain |
 
@@ -394,12 +461,17 @@ bare count is a starting point, not a limit:
 
 1. Every phrase is scanned at the count — ten indices from each end by default.
 2. Any phrase with a hit is followed further, `--expand` indices at a time —
-   four hundred by default: `10..400`, then `400..800`, and so on.
+   a hundred by default: `10..100`, then `100..200`, and so on.
 3. An end stops as soon as one of its rounds comes back with nothing.
 
 **The two ends stop independently.** Activity clusters at one end of a chain, so
 a phrase whose near end keeps hitting goes on growing while its dead far end is
 left where it started.
+
+**Accounts stop independently too.** An account is judged on its own hits, the
+same way an end is: a seed busy on account 0 and untouched on account 2 follows
+the one and leaves the other where the opening pass left it. Expansion is what
+pays for depth, and it only pays where there is something to go deeper into.
 
 Rounds run across every growing phrase at once, so a round costs a couple of
 requests whether one phrase is still growing or forty are:
@@ -475,11 +547,15 @@ release ships with the file in place; from a source build, write one with:
 Either way it arrives ready to run, so you change only what you want changed:
 
 ```toml
-input   = "input.txt"
-found   = "found.txt"
-output  = "output.txt"
-indices = "10"
-upload  = false
+input    = "input.txt"
+accepted = "accepted.txt"
+rejected = "rejected.txt"
+output   = "output.txt"
+upload   = false
+
+# indices  = "10"
+# accounts = 10
+# expand   = 100
 
 [secrets]
 # allkeys-api-key = "ak_..."
@@ -519,12 +595,14 @@ environment variables for anyone who prefers them.
 | `<FILE>` | `input` in config | Text file of keys and phrases, one per line |
 | **Scanning** | | |
 | `-i, --indices <INDICES>` | `10` | Which indices of each chain to scan — a count, or windows |
-| `--expand <N\|false>` | `400` | How far each expansion round reaches, or `false` to scan the count exactly |
+| `-a, --accounts <N>` | `10` | How many accounts to scan, each at the full `--indices` span |
+| `--expand <N\|false>` | `100` | How far each expansion round reaches, or `false` to scan the count exactly |
 | `-p, --passphrase <WORD>` | config / `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
 | `--dry-run` | — | Print derived addresses, contact no network |
 | **Results** | | |
 | `-o, --output <FILE>` | `output` in config | Merge the findings into a file |
-| `--found <FILE>` | `found.txt` | Ledger of everything found, and the input's skip-list |
+| `--accepted <FILE>` | `accepted.txt` | Ledger of everything found, and the input's skip-list |
+| `--rejected <FILE>` | `rejected.txt` | Where the input's unreadable lines are kept |
 | `-u, --upload` | — | Submit found keys to allkeys.directory |
 | `--allkeys-api-key <KEY>` | config / `$ALLKEYS_API_KEY` | allkeys.directory key, required by `--upload` |
 | **Network** | | |
@@ -620,7 +698,8 @@ address, rather than writing a findings file that quietly omits it.
   are sent to blockchain.info.
 - **`--upload` is the only thing that ever sends a key off the machine**, and it
   requires the flag every time.
-- **The ledger and the `-o` file are created `0600`** — readable only by you —
+- **The ledger, `rejected.txt` and the `-o` file are created `0600`** — readable
+  only by you —
   because a world-readable list of spendable keys is a much worse outcome than a
   failed write. The ledger is written on every run, so a scan that finds
   something always leaves keys on this disk.

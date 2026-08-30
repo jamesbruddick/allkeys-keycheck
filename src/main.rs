@@ -26,6 +26,17 @@ use ui::Ui;
 /// Minimum width of the address-type column in the results listing.
 const LABEL_WIDTH: usize = 18;
 
+/// How many accounts a scan reaches by default.
+///
+/// Account 0 is the wallet almost everyone has, and the nine above it cover the
+/// range anyone gets to by asking their wallet for another one. Reaching them
+/// is not cheap — every account is a whole further copy of the scan, paid on
+/// every phrase in the file whether it turns out to hold anything or not — but
+/// an account nobody looked at is a whole wallet missed, where a few unscanned
+/// indices are the tail of one. `--accounts 1` is the cheap pass over a large
+/// wordlist; this is the default because finding the wallet is the point.
+const DEFAULT_ACCOUNTS: u32 = 10;
+
 /// How many rejected input lines to name before summarizing the rest.
 const MAX_LISTED_REJECTS: usize = 5;
 
@@ -57,8 +68,8 @@ Every option here can be set in allkeys-keycheck.toml instead, so a configured
 folder scans with a bare `allkeys-keycheck`. Flags win over the file.
 
 Results need somewhere to go: pass -o, -u, or both, unless --dry-run. Findings
-also accumulate in found.txt, which the input is filtered against, so nothing is
-ever scanned twice.";
+also accumulate in accepted.txt, which the input is filtered against, so nothing
+is ever scanned twice. Lines that named no secret go to rejected.txt.";
 
 #[derive(Parser)]
 // `version` so a downloaded binary can say what it is: the run banner prints
@@ -131,6 +142,30 @@ struct Args {
     )]
     indices: hd::Span,
 
+    /// How many accounts of each phrase to scan
+    ///
+    /// A seed holds a separate wallet at every account number, and most wallet
+    /// software will happily make you a second one. Every account this reaches
+    /// is walked at the full --indices span, exactly as account 0 is: nothing
+    /// about account 0 says whether another was ever made, so nothing about it
+    /// decides how hard the others are looked at.
+    ///
+    /// That makes the cost linear — `--accounts 10`, the default, is ten times
+    /// the addresses of `--accounts 1` — so this is the setting to lower for a
+    /// large wordlist, where the per-phrase cost is what decides the run.
+    ///
+    /// Each account is then followed on its own evidence: an account that turns
+    /// something up is expanded, and the ones that stay empty are not.
+    #[arg(
+        short = 'a',
+        long,
+        default_value_t = DEFAULT_ACCOUNTS,
+        value_parser = clap::value_parser!(u32).range(1..),
+        value_name = "N",
+        help_heading = "Scanning"
+    )]
+    accounts: u32,
+
     /// How far each expansion round reaches in indices, or false to not expand
     ///
     /// A phrase that turns something up is followed past the count it was
@@ -193,11 +228,29 @@ struct Args {
     /// second time.
     #[arg(
         long,
-        default_value = "found.txt",
+        default_value = "accepted.txt",
         value_name = "FILE",
         help_heading = "Results"
     )]
-    found: PathBuf,
+    accepted: PathBuf,
+
+    /// Where the input's unreadable lines are kept
+    ///
+    /// A line that named neither a hex key nor a BIP39 phrase leaves the input
+    /// before the scan starts, since nothing will ever be scanned from it. It
+    /// is written here first, so a typo in a phrase you care about is not
+    /// simply deleted.
+    ///
+    /// One line each, in the same form and the same order as the ledger, so
+    /// lines accumulate across runs and the file can be fed straight back in
+    /// once the typo is fixed. Why a line was rejected is said on screen.
+    #[arg(
+        long,
+        default_value = "rejected.txt",
+        value_name = "FILE",
+        help_heading = "Results"
+    )]
+    rejected: PathBuf,
 
     /// Submit the keys that were found to allkeys.directory
     ///
@@ -404,10 +457,15 @@ fn merge_config(
     if unset(matches, "output") {
         args.output = config.output;
     }
-    if unset(matches, "found")
-        && let Some(found) = config.found
+    if unset(matches, "accepted")
+        && let Some(accepted) = config.accepted
     {
-        args.found = found;
+        args.accepted = accepted;
+    }
+    if unset(matches, "rejected")
+        && let Some(rejected) = config.rejected
+    {
+        args.rejected = rejected;
     }
     if unset(matches, "indices")
         && let Some(indices) = config.indices
@@ -415,6 +473,16 @@ fn merge_config(
         args.indices = indices
             .parse()
             .map_err(|e| format!("indices = \"{indices}\" in the config file: {e}"))?;
+    }
+    if unset(matches, "accounts")
+        && let Some(accounts) = config.accounts
+    {
+        if accounts == 0 {
+            return Err("accounts = 0 in the config file: a scan has to walk at \
+                        least account 0, which is where a wallet starts"
+                .into());
+        }
+        args.accounts = accounts;
     }
     if unset(matches, "expand")
         && let Some(expand) = config.expand
@@ -662,6 +730,13 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         ));
     }
 
+    // --dry-run reports what a real run would do without doing it, and writing
+    // the file is doing it. It takes nothing out of the input either, so the
+    // bad lines are still there to be written on the run that follows.
+    if !args.dry_run {
+        write_rejected(args, &parsed.rejected, ui)?;
+    }
+
     let mut queue = Queue::new(input, &text);
 
     // Before the scan rather than after it, for the three kinds of line that
@@ -746,6 +821,10 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     let mut found = 0;
     let mut numbering = 0;
 
+    // Fixed for the run: every account `--accounts` reaches, each at the span
+    // `--indices` asked for.
+    let plan = hd::Plan::opening(&args.indices, args.accounts);
+
     for batch in batches {
         // Only worth a heading when there is more than one: a single batch is
         // just "the run", and a heading over the whole of it says nothing.
@@ -757,7 +836,7 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         // Noted before `derive_all` consumes the batch: these are the lines
         // that leave the input once the batch is done with.
         let scanned: Vec<usize> = batch.iter().flat_map(Input::lines).collect();
-        let (mut entries, phrases_by_entry) = derive_all(batch, &args.indices, ui)?;
+        let (mut entries, phrases_by_entry) = derive_all(batch, &plan, ui)?;
 
         let Some(client) = &client else {
             show_addresses(&entries, ui);
@@ -1269,12 +1348,16 @@ struct Parsed {
     rejected: Vec<Rejected>,
 }
 
-/// A line that named no secret, and why. The number is kept as well as the
-/// reason because the line is taken out of the input before the scan starts:
-/// nothing will ever be scanned from it, so leaving it there would mean every
-/// future run reading and reporting it again.
+/// A line that named no secret, and why. All three parts are kept because the
+/// line is taken out of the input before the scan starts: nothing will ever be
+/// scanned from it, so leaving it there would mean every future run reading and
+/// reporting it again. The number reports it, and the text is what is written
+/// to the rejected file — a line deleted from the input and nowhere else would
+/// be a typo in a phrase silently thrown away.
 struct Rejected {
     number: usize,
+    /// The line as it appeared in the input, trimmed.
+    line: String,
     reason: String,
 }
 
@@ -1342,7 +1425,11 @@ fn parse_input(text: &str, passphrase: &str, ui: &Ui) -> Result<Parsed, String> 
                         });
                     }
                 },
-                Err(reason) => rejected.push(Rejected { number, reason }),
+                Err(reason) => rejected.push(Rejected {
+                    number,
+                    line: line.to_string(),
+                    reason,
+                }),
             }
             Ok(())
         },
@@ -1405,7 +1492,7 @@ fn drop_known(inputs: &mut Vec<Input>, ledger: &HashSet<String>) -> Known {
 /// expansion pass already treats them the same way.
 fn derive_all(
     inputs: Vec<Input>,
-    span: &hd::Span,
+    plan: &hd::Plan,
     ui: &Ui,
 ) -> Result<(Vec<KeyEntry>, HashMap<usize, hd::Phrase>), String> {
     let secp = Secp256k1::new();
@@ -1413,11 +1500,11 @@ fn derive_all(
 
     in_rounds(
         &inputs,
-        round_of(span.addresses_per_mnemonic()),
+        round_of(plan.addresses_per_mnemonic()),
         "deriving",
         ui,
         |input| match &input.kind {
-            InputKind::Phrase(phrase) => phrase.derive(&secp, &input.raw, span),
+            InputKind::Phrase(phrase) => phrase.derive(&secp, &input.raw, plan),
             InputKind::Key(normalized) => keys::derive(&secp, &input.raw, normalized),
         },
         |input, entry| {
@@ -1492,6 +1579,17 @@ fn check(
 struct Growing {
     /// Position in `entries`.
     entry: usize,
+    /// The accounts still being followed, in account order. A phrase can be
+    /// growing on several at once, and each is judged on its own hits: an
+    /// account with nothing on it is not carried along by one that has.
+    accounts: Vec<GrowingAccount>,
+    /// How far each round reaches, from `--expand`.
+    step: u32,
+}
+
+/// One account of one phrase, and how far each of its ends has been followed.
+struct GrowingAccount {
+    account: u32,
     /// Indices covered so far, counting inwards from each end.
     near: u32,
     far: u32,
@@ -1501,35 +1599,65 @@ struct Growing {
     /// nothing but requests.
     near_open: bool,
     far_open: bool,
-    /// How far each round reaches, from `--expand`.
-    step: u32,
 }
 
-impl Growing {
+impl GrowingAccount {
     /// Which ends still have somewhere to go, with the window each would scan.
-    fn next_windows(&self) -> Vec<(hd::End, std::ops::Range<u32>)> {
+    fn next_windows(&self, step: u32) -> Vec<(hd::End, std::ops::Range<u32>)> {
         let mut windows = Vec::new();
         if self.near_open
-            && let Some(w) = hd::next_window(hd::End::Near, self.near, self.far, self.step)
+            && let Some(w) = hd::next_window(hd::End::Near, self.near, self.far, step)
         {
             windows.push((hd::End::Near, w));
         }
         if self.far_open
-            && let Some(w) = hd::next_window(hd::End::Far, self.far, self.near, self.step)
+            && let Some(w) = hd::next_window(hd::End::Far, self.far, self.near, step)
         {
             windows.push((hd::End::Far, w));
         }
         windows
     }
 
+    fn is_growing(&self, step: u32) -> bool {
+        !self.next_windows(step).is_empty()
+    }
+}
+
+impl Growing {
+    /// The next round's work: every open end of every account still growing,
+    /// with the window it would scan.
+    fn next_windows(&self) -> Vec<(u32, hd::End, std::ops::Range<u32>)> {
+        self.accounts
+            .iter()
+            .flat_map(|a| {
+                a.next_windows(self.step)
+                    .into_iter()
+                    .map(move |(end, w)| (a.account, end, w))
+            })
+            .collect()
+    }
+
     fn is_growing(&self) -> bool {
-        !self.next_windows().is_empty()
+        self.accounts.iter().any(|a| a.is_growing(self.step))
     }
 }
 
 /// The index a derived address sits at, from the tail of its path.
 fn index_of(derived: &Derived) -> Option<u32> {
     derived.path.as_deref()?.rsplit('/').next()?.parse().ok()
+}
+
+/// The account a derived address sits under, from its path: the hardened third
+/// step of `m/44'/0'/0'/0/0`.
+fn account_of(derived: &Derived) -> Option<u32> {
+    derived
+        .path
+        .as_deref()?
+        .split('/')
+        .nth(3)?
+        .strip_suffix('\'')?
+        .parse()
+        .ok()
 }
 
 /// Follow the phrases that showed activity further down their chains.
@@ -1544,6 +1672,12 @@ fn index_of(derived: &Derived) -> Option<u32> {
 /// Rounds are run across all growing phrases at once rather than one phrase at
 /// a time, so each round's addresses batch together into full requests the way
 /// the first pass does.
+///
+/// Every account the opening pass walked is judged on its own hits, and the
+/// same holds for the ends within it: a seed with a busy account 0 and an
+/// untouched account 3 follows the one and leaves the other where it is. The
+/// opening pass is what looks everywhere; expansion is what pays for depth, and
+/// it only pays where there is something to go deeper into.
 ///
 /// The lookup is left to the caller so the loop that decides how far to go can
 /// be exercised without a network.
@@ -1560,21 +1694,43 @@ fn expand_with(
     // following: a count span covers only the two ends, so an index below the
     // middle of the space is a near-end hit and anything else is a far-end one.
     let middle = hd::HARDENED / 2;
+    let mut followed_accounts = 0;
     let mut growing: Vec<Growing> = phrases
         .keys()
         .filter_map(|&entry| {
-            let hit_at = |end: hd::End| {
-                entries[entry].addresses.iter().any(|d| {
+            let addresses = &entries[entry].addresses;
+            let hit_in = |account: u32, end: hd::End| {
+                addresses.iter().any(|d| {
                     hits.contains_key(&d.address)
+                        && account_of(d) == Some(account)
                         && index_of(d).is_some_and(|i| (i < middle) == (end == hd::End::Near))
                 })
             };
+
+            // Each end follows only if that end is what turned something up — and an
+            // account is no different, so every one the opening pass reached is
+            // judged the same way. Taken from the paths rather than from
+            // `--accounts`, so the rounds follow whatever was actually walked.
+            let mut reached: Vec<u32> = addresses.iter().filter_map(account_of).collect();
+            reached.sort_unstable();
+            reached.dedup();
+
+            let accounts: Vec<GrowingAccount> = reached
+                .into_iter()
+                .map(|account| GrowingAccount {
+                    account,
+                    near: start,
+                    far: start,
+                    near_open: hit_in(account, hd::End::Near),
+                    far_open: hit_in(account, hd::End::Far),
+                })
+                .filter(|a| a.is_growing(step))
+                .collect();
+            followed_accounts += accounts.len();
+
             let phrase = Growing {
                 entry,
-                near: start,
-                far: start,
-                near_open: hit_at(hd::End::Near),
-                far_open: hit_at(hd::End::Far),
+                accounts,
                 step,
             };
             phrase.is_growing().then_some(phrase)
@@ -1604,15 +1760,32 @@ fn expand_with(
             ui.progress(done, still_growing, "deriving");
             let entry = phrase.entry;
             let windows = phrase.next_windows();
-            for (end, window) in &windows {
+            for (account, end, window) in &windows {
+                let Some(state) = phrase.accounts.iter_mut().find(|a| a.account == *account) else {
+                    continue;
+                };
                 match end {
-                    hd::End::Near => phrase.near = window.end,
-                    hd::End::Far => phrase.far = hd::HARDENED - window.start,
+                    hd::End::Near => state.near = window.end,
+                    hd::End::Far => state.far = hd::HARDENED - window.start,
                 }
             }
-            let span = hd::Span::of(windows.into_iter().map(|(_, w)| w).collect());
+            // One plan per phrase rather than one per account, so a round pays
+            // the hardened steps at the top of the tree once however many
+            // accounts it is following.
+            let mut plan: Vec<(u32, hd::Span)> = Vec::new();
+            for (account, _, window) in windows {
+                match plan.iter_mut().find(|(a, _)| *a == account) {
+                    Some((_, span)) => {
+                        *span =
+                            hd::Span::of(span.windows().iter().cloned().chain([window]).collect());
+                    }
+                    None => plan.push((account, hd::Span::of(vec![window]))),
+                }
+            }
             let raw = entries[entry].raw.clone();
-            let derived = phrases[&entry].derive(&secp, &raw, &span)?.addresses;
+            let derived = phrases[&entry]
+                .derive(&secp, &raw, &hd::Plan::of(plan))?
+                .addresses;
             round.push((entry, derived));
         }
         ui.clear();
@@ -1629,15 +1802,21 @@ fn expand_with(
         // own; the round's addresses then join the entry they came from, so the
         // report and the output file see them like any other.
         for (entry, derived) in round {
-            let hit_at = |end: hd::End| {
+            let hit_in = |account: u32, end: hd::End| {
                 derived.iter().any(|d| {
                     found.contains_key(&d.address)
+                        && account_of(d) == Some(account)
                         && index_of(d).is_some_and(|i| (i < middle) == (end == hd::End::Near))
                 })
             };
             if let Some(phrase) = growing.iter_mut().find(|p| p.entry == entry) {
-                phrase.near_open &= hit_at(hd::End::Near);
-                phrase.far_open &= hit_at(hd::End::Far);
+                for state in &mut phrase.accounts {
+                    state.near_open &= hit_in(state.account, hd::End::Near);
+                    state.far_open &= hit_in(state.account, hd::End::Far);
+                }
+                // An account with both ends closed is done, and dropping it
+                // keeps the next round's plan to the accounts still moving.
+                phrase.accounts.retain(|a| a.is_growing(step));
             }
             entries[entry].addresses.extend(derived);
         }
@@ -1646,17 +1825,22 @@ fn expand_with(
         growing.retain(Growing::is_growing);
     }
 
-    ui.row(
-        "expanded",
-        &[
-            format!("{} phrase{}", followed, plural(followed)),
-            format!("{rounds} round{}", plural(rounds)),
-            format!("{} addresses", ui::commas(derived_addresses as u64)),
-            format!("{} request{}", requests, plural(requests)),
-            ui::elapsed(started.elapsed()),
-        ]
-        .join(&ui.dim(" · ")),
-    );
+    let mut parts = vec![format!("{} phrase{}", followed, plural(followed))];
+    // Only when a phrase is being followed on more than one: at `--accounts 1`
+    // every round is account 0's, and saying so under every run says nothing.
+    if followed_accounts > followed {
+        parts.push(format!(
+            "{followed_accounts} account{}",
+            plural(followed_accounts)
+        ));
+    }
+    parts.extend([
+        format!("{rounds} round{}", plural(rounds)),
+        format!("{} addresses", ui::commas(derived_addresses as u64)),
+        format!("{} request{}", requests, plural(requests)),
+        ui::elapsed(started.elapsed()),
+    ]);
+    ui.row("expanded", &parts.join(&ui.dim(" · ")));
     Ok(())
 }
 
@@ -1828,6 +2012,47 @@ fn findings(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>) -> Findi
     found
 }
 
+/// Put the lines that named no secret into the rejected file, and say so.
+///
+/// Called before the input is drained, not after, because that is the same rule
+/// every other line is held to: nothing leaves the input until it is safely
+/// somewhere else. A bad line is usually a typo in a phrase — a word misspelled,
+/// a word missing — which is exactly the line worth keeping, and deleting it
+/// from the queue and nowhere else would be the one way this tool could lose a
+/// wallet.
+///
+/// Merged into like the ledger, so the file accumulates across runs and reads
+/// the same however many it took to build. Written in the same shape too — the
+/// line alone, nothing above it — because the file is meant to be fixed up and
+/// fed back in, and a run's reasons are already on screen where they can be
+/// read against the line numbers they name.
+fn write_rejected(args: &Args, rejected: &[Rejected], ui: &Ui) -> Result<(), String> {
+    if rejected.is_empty() {
+        return Ok(());
+    }
+
+    let incoming: Vec<outfile::Record> = rejected
+        .iter()
+        .map(|bad| outfile::Record {
+            comments: Vec::new(),
+            line: bad.line.clone(),
+        })
+        .collect();
+
+    let merged = outfile::merge(outfile::load(&args.rejected)?, incoming);
+    outfile::save(&args.rejected, &merged.records)?;
+
+    // A continuation of the bad lines listed above it rather than a row of its
+    // own: it finishes the sentence they started — here they are, and here is
+    // where they went — and the run already has a row per file it writes.
+    ui.cont(&format!(
+        "written to {} · {} on file",
+        args.rejected.display(),
+        ui::commas(merged.secrets() as u64)
+    ));
+    Ok(())
+}
+
 /// Read the ledger, tidy it, report it, and hand back what it holds.
 ///
 /// Merging an empty run into the file folds it onto itself and sorts it — the
@@ -1840,11 +2065,11 @@ fn findings(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>) -> Findi
 /// about to be judged against: what is already here is what will not be looked
 /// up again.
 fn open_ledger(args: &Args, ui: &Ui) -> Result<HashSet<String>, String> {
-    let merged = outfile::merge(outfile::load(&args.found)?, Vec::new());
+    let merged = outfile::merge(outfile::load(&args.accepted)?, Vec::new());
     // --dry-run reports what a real run would do without doing it, and
     // rewriting the file is doing it.
     if !args.dry_run {
-        outfile::save(&args.found, &merged.records)?;
+        outfile::save(&args.accepted, &merged.records)?;
     }
 
     let mut aside = Vec::new();
@@ -1899,9 +2124,9 @@ fn write_results(
     // file: the ledger is what the next run's input is filtered against, so it
     // is the one that must not miss a batch. An output file that names the same
     // path is one destination, not two — it has already been written.
-    let mut destinations: Vec<&Path> = vec![&args.found];
+    let mut destinations: Vec<&Path> = vec![&args.accepted];
     if let Some(output) = args.output.as_deref()
-        && output != args.found
+        && output != args.accepted
     {
         destinations.push(output);
     }
@@ -1945,7 +2170,7 @@ fn write_results(
     let mut aside = Vec::new();
     if let Some((_, merged)) = written
         .iter()
-        .find(|(path, _)| *path == args.found.as_path())
+        .find(|(path, _)| *path == args.accepted.as_path())
     {
         if merged.added > 0 {
             aside.push(format!("{} new", ui::commas(merged.added as u64)));
@@ -2005,7 +2230,8 @@ mod tests {
         // having nowhere to put the results.
         assert_eq!(args.input.as_deref(), Some(Path::new("input.txt")));
         assert_eq!(args.output.as_deref(), Some(Path::new("output.txt")));
-        assert_eq!(args.found, Path::new("found.txt"));
+        assert_eq!(args.accepted, Path::new("accepted.txt"));
+        assert_eq!(args.rejected, Path::new("rejected.txt"));
 
         // The rest are the defaults written out, so copying the file changes
         // nothing about how a scan behaves.
@@ -2018,6 +2244,12 @@ mod tests {
         assert!(!args.upload);
         assert!(!args.dry_run);
         assert_eq!(args.expand, config::Expand::default());
+    }
+
+    /// Account 0 alone, at one span: the shape a scan had before `--accounts`,
+    /// and what the index-expansion tests below are written against.
+    fn account_zero(span: &hd::Span) -> hd::Plan {
+        hd::Plan::of(vec![(0, span.clone())])
     }
 
     fn used() -> api::Balance {
@@ -2034,7 +2266,7 @@ mod tests {
     fn indices_by_address(phrase: &hd::Phrase, reach: u32) -> HashMap<String, u32> {
         let secp = Secp256k1::new();
         phrase
-            .derive(&secp, PHRASE, &hd::Span::of(vec![0..reach]))
+            .derive(&secp, PHRASE, &account_zero(&hd::Span::of(vec![0..reach])))
             .expect("derivation of a valid phrase cannot fail")
             .addresses
             .iter()
@@ -2057,7 +2289,7 @@ mod tests {
         let phrase = hd::parse(PHRASE, "").expect("test vector phrase is valid");
         let span: hd::Span = start.to_string().parse().expect("a count is a legal span");
         let entry = phrase
-            .derive(&secp, PHRASE, &span)
+            .derive(&secp, PHRASE, &account_zero(&span))
             .expect("derivation of a valid phrase cannot fail");
 
         // Reaching further than any round should, so that an expansion which
@@ -2107,6 +2339,138 @@ mod tests {
         (indices, far)
     }
 
+    /// One phrase scanned at the opening plan for `accounts`, then expanded
+    /// against a fake chain in which every address under `active` — an account
+    /// and how far up its near end the activity runs — has been used.
+    ///
+    /// Returns, per account, the near-end indices that ended up derived on one
+    /// branch: the accounts that grew are the ones that reached past the span
+    /// the opening pass gave every one of them.
+    fn expanded_accounts(accounts: u32, active: &[(u32, u32)]) -> Vec<(u32, Vec<u32>)> {
+        let ui = Ui::new();
+        let secp = Secp256k1::new();
+        let phrase = hd::parse(PHRASE, "").expect("test vector phrase is valid");
+        let start = 10;
+        let span: hd::Span = start.to_string().parse().expect("a count is a legal span");
+        let entry = phrase
+            .derive(&secp, PHRASE, &hd::Plan::opening(&span, accounts))
+            .expect("derivation of a valid phrase cannot fail");
+
+        // Reaching further than any round should, so an expansion that
+        // overshoots shows up as an unmarked address rather than as a pass.
+        let used_addresses: HashMap<String, ()> = active
+            .iter()
+            .flat_map(|&(account, reach)| {
+                phrase
+                    .derive(
+                        &secp,
+                        PHRASE,
+                        &hd::Plan::of(vec![(account, hd::Span::of(vec![0..reach]))]),
+                    )
+                    .expect("derivation of a valid phrase cannot fail")
+                    .addresses
+                    .into_iter()
+                    .map(|d| (d.address, ()))
+            })
+            .collect();
+
+        let mut entries = vec![entry];
+        let mut phrases = HashMap::new();
+        phrases.insert(0, phrase);
+
+        let mut hits: HashMap<String, api::Balance> = entries[0]
+            .addresses
+            .iter()
+            .filter(|d| used_addresses.contains_key(&d.address))
+            .map(|d| (d.address.clone(), used()))
+            .collect();
+
+        expand_with(
+            &mut entries,
+            &phrases,
+            &mut hits,
+            start,
+            hd::EXPANSION_STEP,
+            &ui,
+            |addresses| {
+                let found = addresses
+                    .iter()
+                    .filter(|a| used_addresses.contains_key(*a))
+                    .map(|a| (a.clone(), used()))
+                    .collect();
+                Ok((found, 1))
+            },
+        )
+        .expect("expansion of a valid phrase cannot fail");
+
+        let mut by_account: Vec<(u32, Vec<u32>)> = Vec::new();
+        for derived in &entries[0].addresses {
+            if derived.kind != keys::AddressKind::P2wpkh {
+                continue;
+            }
+            let path = derived.path.as_deref().unwrap();
+            let (Some(account), Some(index)) = (account_of(derived), index_of(derived)) else {
+                continue;
+            };
+            if !path.starts_with(&format!("m/44'/0'/{account}'/0/")) || index >= hd::HARDENED / 2 {
+                continue;
+            }
+            match by_account.iter_mut().find(|(a, _)| *a == account) {
+                Some((_, seen)) => seen.push(index),
+                None => by_account.push((account, vec![index])),
+            }
+        }
+        for (_, seen) in &mut by_account {
+            seen.sort_unstable();
+            seen.dedup();
+        }
+        by_account.sort_by_key(|(account, _)| *account);
+        by_account
+    }
+
+    /// The opening pass looks at every account, so an account nobody would
+    /// otherwise have reached is found on its own evidence — and then followed
+    /// on its own evidence too, without dragging the empty ones along.
+    #[test]
+    fn only_the_account_that_hit_is_followed() {
+        // Account 0 is empty and account 2 is used through index 250.
+        let grown = expanded_accounts(4, &[(2, 251)]);
+        assert_eq!(
+            grown.iter().map(|(a, _)| *a).collect::<Vec<u32>>(),
+            [0, 1, 2, 3]
+        );
+
+        // Account 2 is followed like any other hit: out to 300 in rounds of a
+        // hundred, then an empty 300..400 ends it.
+        assert_eq!(grown[2].1, (0..400).collect::<Vec<u32>>());
+
+        // The three with nothing on them stay exactly where the opening pass
+        // left them, which is the whole cost of an account that was never used.
+        for i in [0, 1, 3] {
+            assert_eq!(grown[i].1, (0..10).collect::<Vec<u32>>(), "account {i}");
+        }
+    }
+
+    /// A hit on one account says nothing about the others, so it does not buy
+    /// them any depth: expansion is paid for per account, like per end.
+    #[test]
+    fn a_hit_on_one_account_does_not_follow_the_rest() {
+        let grown = expanded_accounts(4, &[(0, 5)]);
+        // Account 0 grows on its own hit.
+        assert_eq!(grown[0].1, (0..100).collect::<Vec<u32>>());
+        for i in [1, 2, 3] {
+            assert_eq!(grown[i].1, (0..10).collect::<Vec<u32>>(), "account {i}");
+        }
+    }
+
+    /// And a phrase with nothing anywhere costs its opening pass and no more.
+    #[test]
+    fn a_phrase_with_no_activity_is_not_followed_on_any_account() {
+        for (account, indices) in expanded_accounts(4, &[]) {
+            assert_eq!(indices, (0..10).collect::<Vec<u32>>(), "account {account}");
+        }
+    }
+
     /// A phrase entry with one hit address, built by hand: `records` cares only
     /// about the source, the display form and which addresses are in `hits`.
     fn phrase_entry(display: &str, secret: &str, address: &str) -> KeyEntry {
@@ -2154,20 +2518,20 @@ mod tests {
 
     #[test]
     fn expansion_follows_an_end_that_keeps_hitting() {
-        // Used through index 599, so the rounds run 10..400 and 400..800 —
-        // each with a hit of its own — and then 800..1200 comes back empty and
+        // Used through index 599, so the rounds run 10..100 up to 500..600 —
+        // each with a hit of its own — and then 600..700 comes back empty and
         // ends it. The dead far end is left where it started.
         let (near, far) = expanded(10, 600);
-        assert_eq!(near, (0..1200).collect::<Vec<u32>>());
+        assert_eq!(near, (0..700).collect::<Vec<u32>>());
         assert_eq!(far.len(), 10);
     }
 
     #[test]
     fn expansion_stops_where_the_activity_does() {
-        // Only index 0 is used: the near end grows once, to 400, and the empty
+        // Only index 0 is used: the near end grows once, to 100, and the empty
         // round that follows ends it.
         let (near, far) = expanded(10, 1);
-        assert_eq!(near, (0..400).collect::<Vec<u32>>());
+        assert_eq!(near, (0..100).collect::<Vec<u32>>());
         assert_eq!(far.len(), 10);
     }
 
@@ -2573,7 +2937,11 @@ mod tests {
     /// fixed-cost pass into an expanding one without saying so.
     #[test]
     fn the_settings_that_were_dropped_are_refused_by_name() {
-        for gone in ["no-expand = true\n", "no-color = true\n"] {
+        for gone in [
+            "no-expand = true\n",
+            "no-color = true\n",
+            "found = \"found.txt\"\n",
+        ] {
             let Err(e) = toml::from_str::<config::Config>(gone) else {
                 panic!("{gone:?} must not be accepted");
             };
@@ -2582,6 +2950,7 @@ mod tests {
 
         assert!(Args::try_parse_from(["allkeys-keycheck", "--no-expand"]).is_err());
         assert!(Args::try_parse_from(["allkeys-keycheck", "--no-color"]).is_err());
+        assert!(Args::try_parse_from(["allkeys-keycheck", "--found", "found.txt"]).is_err());
     }
 
     /// A funded phrase is printed six words to a line — four lines for 24

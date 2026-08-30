@@ -11,7 +11,12 @@ input = "input.txt"
 # The ledger of everything ever found. Written on every run, and read before
 # every scan: a key or phrase already in here leaves the input straight away
 # rather than being looked up a second time.
-found = "found.txt"
+accepted = "accepted.txt"
+
+# Where the input lines that named neither a key nor a phrase are kept, one per
+# line. They leave the input before the scan starts, so this is what stops a
+# typo in a phrase being thrown away.
+rejected = "rejected.txt"
 
 # Where the findings are saved. Merged into, never replaced. A run needs this,
 # upload, or both.
@@ -25,9 +30,14 @@ upload = false
 # end, or absolute windows like "10..110". Always quoted.
 # indices = "10"
 
+# How many accounts of each phrase to scan. Every one is walked at the indices
+# above, exactly as account 0 is, so this multiplies the cost of the run. Lower
+# it for a large wordlist, where the per-phrase cost is what decides the run.
+# accounts = 10
+
 # How far each round follows a phrase that turned something up, in indices,
 # or false to scan the indices count exactly and follow nothing further.
-# expand = 400
+# expand = 100
 
 # Maximum addresses per API request. 1500 is also the most the API will take —
 # a larger batch comes back empty rather than as an error.
