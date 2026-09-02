@@ -11,7 +11,7 @@ input = "input.txt"
 # The ledger of everything ever found. Written on every run, and read before
 # every scan: a key or phrase already in here leaves the input straight away
 # rather than being looked up a second time.
-accepted = "accepted.txt"
+found = "found.txt"
 
 # Where the input lines that named neither a key nor a phrase are kept, one per
 # line. They leave the input before the scan starts, so this is what stops a

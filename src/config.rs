@@ -137,7 +137,7 @@ impl<'de> Deserialize<'de> for Expand {
 pub struct Config {
     pub input: Option<PathBuf>,
     pub output: Option<PathBuf>,
-    pub accepted: Option<PathBuf>,
+    pub found: Option<PathBuf>,
     pub rejected: Option<PathBuf>,
     pub upload: Option<bool>,
     pub indices: Option<String>,

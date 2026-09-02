@@ -68,8 +68,8 @@ Every option here can be set in allkeys-keycheck.toml instead, so a configured
 folder scans with a bare `allkeys-keycheck`. Flags win over the file.
 
 Results need somewhere to go: pass -o, -u, or both, unless --dry-run. Findings
-also accumulate in accepted.txt, which the input is filtered against, so nothing
-is ever scanned twice. Lines that named no secret go to rejected.txt.";
+also accumulate in found.txt, which the input is filtered against, so nothing is
+ever scanned twice. Lines that named no secret go to rejected.txt.";
 
 #[derive(Parser)]
 // `version` so a downloaded binary can say what it is: the run banner prints
@@ -228,11 +228,11 @@ struct Args {
     /// second time.
     #[arg(
         long,
-        default_value = "accepted.txt",
+        default_value = "found.txt",
         value_name = "FILE",
         help_heading = "Results"
     )]
-    accepted: PathBuf,
+    found: PathBuf,
 
     /// Where the input's unreadable lines are kept
     ///
@@ -457,10 +457,10 @@ fn merge_config(
     if unset(matches, "output") {
         args.output = config.output;
     }
-    if unset(matches, "accepted")
-        && let Some(accepted) = config.accepted
+    if unset(matches, "found")
+        && let Some(found) = config.found
     {
-        args.accepted = accepted;
+        args.found = found;
     }
     if unset(matches, "rejected")
         && let Some(rejected) = config.rejected
@@ -2065,11 +2065,11 @@ fn write_rejected(args: &Args, rejected: &[Rejected], ui: &Ui) -> Result<(), Str
 /// about to be judged against: what is already here is what will not be looked
 /// up again.
 fn open_ledger(args: &Args, ui: &Ui) -> Result<HashSet<String>, String> {
-    let merged = outfile::merge(outfile::load(&args.accepted)?, Vec::new());
+    let merged = outfile::merge(outfile::load(&args.found)?, Vec::new());
     // --dry-run reports what a real run would do without doing it, and
     // rewriting the file is doing it.
     if !args.dry_run {
-        outfile::save(&args.accepted, &merged.records)?;
+        outfile::save(&args.found, &merged.records)?;
     }
 
     let mut aside = Vec::new();
@@ -2124,9 +2124,9 @@ fn write_results(
     // file: the ledger is what the next run's input is filtered against, so it
     // is the one that must not miss a batch. An output file that names the same
     // path is one destination, not two — it has already been written.
-    let mut destinations: Vec<&Path> = vec![&args.accepted];
+    let mut destinations: Vec<&Path> = vec![&args.found];
     if let Some(output) = args.output.as_deref()
-        && output != args.accepted
+        && output != args.found
     {
         destinations.push(output);
     }
@@ -2170,7 +2170,7 @@ fn write_results(
     let mut aside = Vec::new();
     if let Some((_, merged)) = written
         .iter()
-        .find(|(path, _)| *path == args.accepted.as_path())
+        .find(|(path, _)| *path == args.found.as_path())
     {
         if merged.added > 0 {
             aside.push(format!("{} new", ui::commas(merged.added as u64)));
@@ -2230,7 +2230,7 @@ mod tests {
         // having nowhere to put the results.
         assert_eq!(args.input.as_deref(), Some(Path::new("input.txt")));
         assert_eq!(args.output.as_deref(), Some(Path::new("output.txt")));
-        assert_eq!(args.accepted, Path::new("accepted.txt"));
+        assert_eq!(args.found, Path::new("found.txt"));
         assert_eq!(args.rejected, Path::new("rejected.txt"));
 
         // The rest are the defaults written out, so copying the file changes
@@ -2937,11 +2937,7 @@ mod tests {
     /// fixed-cost pass into an expanding one without saying so.
     #[test]
     fn the_settings_that_were_dropped_are_refused_by_name() {
-        for gone in [
-            "no-expand = true\n",
-            "no-color = true\n",
-            "found = \"found.txt\"\n",
-        ] {
+        for gone in ["no-expand = true\n", "no-color = true\n"] {
             let Err(e) = toml::from_str::<config::Config>(gone) else {
                 panic!("{gone:?} must not be accepted");
             };
@@ -2950,7 +2946,6 @@ mod tests {
 
         assert!(Args::try_parse_from(["allkeys-keycheck", "--no-expand"]).is_err());
         assert!(Args::try_parse_from(["allkeys-keycheck", "--no-color"]).is_err());
-        assert!(Args::try_parse_from(["allkeys-keycheck", "--found", "found.txt"]).is_err());
     }
 
     /// A funded phrase is printed six words to a line — four lines for 24

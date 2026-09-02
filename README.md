@@ -68,7 +68,7 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.7.3
+  allkeys-keycheck 0.7.4
 
          found  0 on file
       scanning  keys.txt · 1 key · 1 duplicate removed · 1 bad line removed
@@ -85,9 +85,9 @@ Four things to know before your first real run:
 
 - **A run needs somewhere to put its results** — `-o`, `-u`, or both. Passing
   neither is refused before any work starts.
-- **Everything found also goes to `accepted.txt`**, the ledger, whichever of
-  those you passed. The next run's input is filtered against it, so nothing is
-  ever scanned twice. See [The ledger](#the-ledger).
+- **Everything found also goes to `found.txt`**, the ledger, whichever of those
+  you passed. The next run's input is filtered against it, so nothing is ever
+  scanned twice. See [The ledger](#the-ledger).
 - **Lines that named no secret go to `rejected.txt`**, one per line, before
   they leave the input. See [The rejected file](#the-rejected-file).
 - **The input file is a queue.** Scanned lines leave it as each batch finishes.
@@ -104,7 +104,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.7.3
+  allkeys-keycheck 0.7.4
 
          found  0 on file
       scanning  keys.txt · 1 key · 1 phrase
@@ -263,12 +263,12 @@ still holding coins is spelled out in full, with the address and the amount.
 
 ### The ledger
 
-Everything found goes into `accepted.txt` — the ledger — on every run. It is the
+Everything found goes into `found.txt` — the ledger — on every run. It is the
 record of what this machine has established is active, and it is what the next
 run's input is filtered against, so it has to be complete: a memory you can
 forget to ask for would leave the same wordlist slice being rescanned forever.
 It is kept quietly: the `written` row reports the `-o` file, which holds the
-same list. `--accepted`, or `accepted = "..."` in the config, moves the ledger.
+same list. `--found`, or `found = "..."` in the config, moves the ledger.
 
 It is a memory, not a destination, so it does not satisfy the rule that a run
 needs one. `-o` writes the findings to a file you name and keep; `-u` submits
@@ -548,7 +548,7 @@ Either way it arrives ready to run, so you change only what you want changed:
 
 ```toml
 input    = "input.txt"
-accepted = "accepted.txt"
+found    = "found.txt"
 rejected = "rejected.txt"
 output   = "output.txt"
 upload   = false
@@ -601,7 +601,7 @@ environment variables for anyone who prefers them.
 | `--dry-run` | — | Print derived addresses, contact no network |
 | **Results** | | |
 | `-o, --output <FILE>` | `output` in config | Merge the findings into a file |
-| `--accepted <FILE>` | `accepted.txt` | Ledger of everything found, and the input's skip-list |
+| `--found <FILE>` | `found.txt` | Ledger of everything found, and the input's skip-list |
 | `--rejected <FILE>` | `rejected.txt` | Where the input's unreadable lines are kept |
 | `-u, --upload` | — | Submit found keys to allkeys.directory |
 | `--allkeys-api-key <KEY>` | config / `$ALLKEYS_API_KEY` | allkeys.directory key, required by `--upload` |
