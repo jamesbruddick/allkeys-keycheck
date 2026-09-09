@@ -5,8 +5,7 @@ use bitcoin::key::{CompressedPublicKey, PublicKey, Secp256k1};
 use bitcoin::secp256k1::{self, All, SecretKey};
 use bitcoin::{Address, Network};
 
-/// The address encodings a single key can control. A key that was used years
-/// ago is most likely P2PKH; recent wallets use P2WPKH or P2TR.
+/// The address encodings a single key can control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressKind {
     P2pkhUncompressed,
@@ -30,9 +29,8 @@ impl AddressKind {
 
 /// One derived address, together with the key that spends it.
 ///
-/// The key is carried per address rather than per entry because a mnemonic
-/// controls thousands of distinct keys: when one of its addresses turns out to
-/// have history, the secret worth reporting is that child's, not the phrase's.
+/// The key is carried per address because a mnemonic controls thousands of
+/// distinct keys, and a hit reports that child's secret, not the phrase's.
 pub struct Derived {
     pub kind: AddressKind,
     pub address: String,
@@ -43,9 +41,8 @@ pub struct Derived {
 }
 
 impl Derived {
-    /// What to print in the address-type column. A bare key is named by its
-    /// encoding alone; a derived one needs both, since the same key appears
-    /// once per encoding and the path no longer implies which is which.
+    /// The address-type column: a bare key is named by its encoding alone, a
+    /// derived one by its path and encoding together.
     pub fn label(&self) -> String {
         match &self.path {
             Some(path) => format!("{path} {}", self.kind.label()),
@@ -89,10 +86,9 @@ impl KeyEntry {
 
 /// A line with surrounding whitespace and any byte-order mark removed.
 ///
-/// Editors on Windows write a BOM at the start of a UTF-8 file. It is stripped
-/// here rather than inside `normalize` alone, so that the text echoed to the
-/// output file is clean too — otherwise the first written key would carry the
-/// mark and no longer be plain hex.
+/// Windows editors write a BOM at the start of a UTF-8 file. Stripped here
+/// rather than in `normalize` alone, so the text echoed to the output file is
+/// clean too.
 pub fn clean(line: &str) -> &str {
     line.trim().trim_start_matches('\u{feff}').trim()
 }
@@ -120,12 +116,11 @@ pub fn hex_of(bytes: &[u8]) -> String {
     out
 }
 
-/// The public key behind one secret, in the forms the five encodings need.
+/// The public key behind one secret, shared by all five encodings.
 ///
-/// Worth a type of its own because the multiplication that turns a secret into
-/// a public key is the expensive step of an address, and all five encodings are
-/// views of the same result: computing it per encoding would pay for it five
-/// times over on every key in a mnemonic's tree.
+/// The multiplication that turns a secret into a public key is the expensive
+/// step, and every encoding is a view of the same result — computing it per
+/// encoding would pay for it five times per key.
 pub struct PublicForms {
     inner: secp256k1::PublicKey,
 }
@@ -169,9 +164,9 @@ impl PublicForms {
     }
 }
 
-/// Every encoding one private key can control, whether it arrived on its own or
-/// came out of a mnemonic's tree — a derivation path says what a wallet meant
-/// to hand out, not what the key is able to receive.
+/// Every encoding one private key can control, whether it arrived bare or out
+/// of a mnemonic's tree: a derivation path says what a wallet meant to hand
+/// out, not what the key can receive.
 pub const BARE_KEY_KINDS: [AddressKind; 5] = [
     AddressKind::P2pkhUncompressed,
     AddressKind::P2pkhCompressed,
@@ -181,9 +176,9 @@ pub const BARE_KEY_KINDS: [AddressKind; 5] = [
 ];
 
 pub fn derive(secp: &Secp256k1<All>, raw: &str, normalized: &str) -> Result<KeyEntry, String> {
-    // Slicing below is by byte offset and the parse is infallible only for a
-    // string `normalize` produced. Checked rather than assumed, so a future
-    // caller gets an error instead of a panic.
+    // The slicing below is by byte offset and the parse is infallible only for
+    // a string `normalize` produced, so a caller that skipped it gets an error
+    // rather than a panic.
     if normalized.len() != 64 || !normalized.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("not a 64-character hex key".into());
     }
@@ -220,8 +215,8 @@ mod tests {
 
     #[test]
     fn accepts_the_decorations_real_files_carry() {
-        // Every one of these must reduce to the same key, or the same key
-        // written two ways would be scanned twice and counted twice.
+        // Each must reduce to the same key, or one key written two ways would
+        // be scanned twice.
         for input in [
             KEY,
             &format!("0x{KEY}"),

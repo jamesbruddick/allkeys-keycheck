@@ -8,16 +8,15 @@ use std::io::{IsTerminal, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Labels sit right-aligned in a gutter this wide, so every value in the run
-/// starts at the same column and the output reads as one table.
+/// Labels sit right-aligned in a gutter this wide, so every value starts at
+/// the same column and the output reads as one table.
 const GUTTER: usize = 12;
 
 /// Column where values begin: two-space margin, gutter, two-space separator.
 const VALUE_COL: usize = 2 + GUTTER + 2;
 
-/// How far a `detail` sits inside the `cont` line it belongs to. Public because
-/// a caller laying out columns across both has to pad by the same step to keep
-/// them in one grid.
+/// How far a `detail` sits inside the `cont` line it belongs to. Public so a
+/// caller laying out columns across both can pad by the same step.
 pub const DETAIL_INDENT: usize = 2;
 
 const RESET: &str = "\x1b[0m";
@@ -27,12 +26,9 @@ const DIM: &str = "\x1b[2m";
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
 
-/// One colour of the palette, in both the depths a terminal might offer.
-///
-/// The exact hex is what allkeys.directory paints with; the index is the
-/// nearest xterm-256 slot, for a terminal that never advertised truecolor.
-/// Naming both here keeps the approximation next to the colour it stands in
-/// for, rather than in a conversion that would have to guess at intent.
+/// One colour of the palette, at both the depths a terminal might offer: the
+/// exact hex allkeys.directory paints with, and the nearest xterm-256 slot for
+/// a terminal that never advertised truecolor.
 struct Color {
     rgb: (u8, u8, u8),
     index: u8,
@@ -44,10 +40,9 @@ impl Color {
     }
 }
 
-/// The palette is the site's, so the tool and the directory it uploads to read
-/// as one product. Bitcoin orange is the brand and carries the run's headlines;
-/// gold is money, the same colour the site's balances use; the lighter orange
-/// is for addresses, which are everywhere and would shout in full brand.
+/// The site's palette, so the tool and the directory read as one product.
+/// Orange is the brand and carries the headlines, gold is money, and the
+/// lighter orange is for addresses, which are everywhere.
 const BRAND: Color = Color::new((0xf7, 0x93, 0x1a), 208);
 const BRAND_SOFT: Color = Color::new((0xfd, 0xba, 0x74), 216);
 const GOLD: Color = Color::new((0xfa, 0xcc, 0x15), 220);
@@ -59,22 +54,18 @@ pub struct Ui {
     /// Progress is only drawn in place when stderr is a real terminal.
     interactive: bool,
     /// Whether the terminal said it can take 24-bit colour. The palette is a
-    /// set of specific oranges that the 256-colour cube only approximates, so
-    /// it is worth asking rather than always settling for the nearest slot.
+    /// set of specific oranges the 256-colour cube only approximates.
     truecolor: bool,
-    /// When each throttled warning may next be repeated, by key. Requests are
-    /// in flight several at a time and meet the same outage in the same second,
-    /// so without this the number of warnings a problem produces is a reading of
-    /// `--concurrency` rather than of the problem.
+    /// When each throttled warning may next be repeated, by key. Requests in
+    /// flight together meet the same outage in the same second, so without this
+    /// the warning count reads `--concurrency` rather than the problem.
     silence: Mutex<HashMap<String, Instant>>,
 }
 
 impl Ui {
-    /// Colour is worked out from the terminal rather than asked about: on when
-    /// the stream is a terminal that did not say otherwise, off when output is
-    /// redirected, when `NO_COLOR` is set, or when `TERM` is `dumb`. Those are
-    /// the conventions every other tool already honours, so a user who wants
-    /// plain output has set them once for all of them.
+    /// Colour is detected rather than configured: on when the stream is a
+    /// terminal that did not say otherwise, off when output is redirected, when
+    /// `NO_COLOR` is set, or when `TERM` is `dumb`.
     pub fn new() -> Self {
         let allowed = std::env::var_os("NO_COLOR").is_none()
             && std::env::var("TERM").map_or(true, |t| t != "dumb");
@@ -85,9 +76,8 @@ impl Ui {
                 .is_ok_and(|v| v.contains("truecolor") || v.contains("24bit")),
             silence: Mutex::new(HashMap::new()),
         };
-        // The cursor spends the run parked at the end of a progress bar that is
-        // being redrawn under it, which reads as flicker. Hidden for the length
-        // of the run and restored by `Drop`.
+        // The cursor would otherwise sit at the end of a progress bar being
+        // redrawn under it, which reads as flicker. Restored by `Drop`.
         if ui.interactive {
             eprint!("{HIDE_CURSOR}");
             let _ = std::io::stderr().flush();
@@ -180,11 +170,11 @@ impl Ui {
     }
 
     /// Non-fatal problems go to stderr so they survive redirection of stdout.
-    /// The leading clear keeps a warning from landing on top of a progress bar.
+    /// The leading clear keeps a warning off the top of a progress bar.
     pub fn warn(&self, text: &str) {
         let padded = format!("{:>GUTTER$}", "warning");
-        // The clear goes before the margin: `\r` returns to column 0 and would
-        // otherwise erase the two leading spaces.
+        // Before the margin: `\r` returns to column 0 and would otherwise
+        // erase the two leading spaces.
         let (clear, label) = if self.interactive {
             ("\r\x1b[K", format!("{}{padded}{RESET}", self.sgr(&AMBER)))
         } else {
@@ -193,24 +183,21 @@ impl Ui {
         eprintln!("{clear}  {label}  {text}");
     }
 
-    /// A warning several workers will raise at once: printed only if nothing
-    /// else has raised the same `key` within `window`, so one line stands for
+    /// A warning several workers raise at once: printed only if nothing else
+    /// has raised the same `key` within `window`, so one line stands for
     /// however many requests are in flight.
     ///
-    /// The key is what the warning is *about* and the text is what it says
-    /// this time, which is why they are separate: a retry line naming a growing
-    /// backoff is new text about an unchanged problem, and it is the problem
-    /// that should decide whether it is worth another line.
+    /// The key is what the warning is *about*, the text what it says this time
+    /// — a retry line naming a growing backoff is new text about an unchanged
+    /// problem, and the problem decides whether it earns another line.
     pub fn warn_throttled(&self, key: &str, window: Duration, text: &str) {
         let now = Instant::now();
         {
-            // Poisoning only means some other thread panicked mid-warning;
-            // there is nothing here to be left inconsistent, and a run should
-            // not die over a log line.
+            // Poisoning only means another thread panicked mid-warning; there
+            // is nothing here to be left inconsistent.
             let mut silence = self.silence.lock().unwrap_or_else(|e| e.into_inner());
-            // Expired entries are swept on the way past rather than left to
-            // accumulate — keys can carry an address, and a long scan sees a
-            // lot of addresses.
+            // Swept on the way past rather than left to accumulate: keys can
+            // carry an address, and a long scan sees many.
             silence.retain(|_, until| *until > now);
             if silence.contains_key(key) {
                 return;
@@ -230,38 +217,32 @@ impl Ui {
         eprintln!("  {label}  {text}");
     }
 
-    /// Redraw a single progress line in place. Falls back to nothing at all
-    /// when not interactive — the per-batch detail is noise in a log file.
+    /// Redraw a single progress line in place, or nothing at all when not
+    /// interactive — the per-batch detail is noise in a log file.
     pub fn progress(&self, done: usize, total: usize, label: &str) {
         if !self.interactive {
             return;
         }
         const WIDTH: usize = 24;
-        // Nothing to get through is nothing to wait for, so an empty total
-        // reads as a full bar rather than as a division by zero.
+        // An empty total reads as a full bar rather than a division by zero.
         let filled = (done * WIDTH).checked_div(total).unwrap_or(WIDTH);
-        // The track is dim rather than brand: only the filled part is the
-        // figure worth reading, and colouring both makes the bar look full at a
-        // glance whatever it says.
+        // The track is dim rather than brand: colouring both would make the
+        // bar look full at a glance whatever it says.
         let bar = format!(
             "{}{}{RESET}{DIM}{}{RESET}",
             self.sgr(&BRAND),
             "█".repeat(filled),
             "░".repeat(WIDTH.saturating_sub(filled))
         );
-        // Drawn in the gutter layout too, so the bar sits where the row it
-        // will be replaced by is going to appear. A label wider than the gutter
-        // would push the bar out of that column, so it is cut to fit rather
-        // than allowed to shift the line.
+        // Drawn in the gutter layout, so the bar sits where the row that
+        // replaces it will appear. A label wider than the gutter is cut to fit
+        // rather than allowed to shift the line.
         let fitted: String = label.chars().take(GUTTER).collect();
         let gutter = format!("{fitted:>GUTTER$}");
         // The trailing `\n…\x1b[A` opens a blank line under the bar and steps
-        // back onto it: the bar is the last thing in the terminal for the
-        // length of the run, and sitting flush against the shell's next prompt
-        // — or against a warning that lands right below it — reads as cramped.
-        // The line below is cleared as well as opened, since the bar moves down
-        // the screen as warnings push it along and would otherwise leave the
-        // previous frame's tail sitting there.
+        // back onto it, so the bar does not sit flush against the next prompt
+        // or a warning below it. That line is cleared as well as opened, since
+        // warnings push the bar down and would leave the last frame's tail.
         eprint!("\r  {DIM}{gutter}{RESET}  {bar} {DIM}{done}/{total}{RESET}\x1b[K\n\x1b[K\x1b[A");
         let _ = std::io::stderr().flush();
     }
@@ -275,20 +256,16 @@ impl Ui {
     }
 }
 
-/// `new` takes no arguments now that colour is detected rather than configured,
-/// which makes a `Default` the same thing. It is spelled out rather than derived
-/// because constructing a `Ui` hides the terminal's cursor, and the `Drop` that
-/// gives it back is the reason a stray temporary would be a bug.
+/// Spelled out rather than derived: constructing a `Ui` hides the terminal's
+/// cursor, so a stray temporary would be a bug.
 impl Default for Ui {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Give the cursor back, on every way out of the program that runs destructors
-/// — a clean finish, an early error return, or a panic that unwinds. A terminal
-/// left without a cursor is a broken terminal, so this is not left to the
-/// success path to do.
+/// Give the cursor back on every exit that runs destructors: a clean finish,
+/// an early error return, or a panic that unwinds.
 impl Drop for Ui {
     fn drop(&mut self) {
         if self.interactive {
@@ -298,8 +275,7 @@ impl Drop for Ui {
     }
 }
 
-/// Satoshis as BTC, trimmed of trailing zeros — `0.5` reads better than
-/// `0.50000000` in a dense table.
+/// Satoshis as BTC, trimmed of trailing zeros.
 pub fn btc(sats: u64) -> String {
     let text = format!("{:.8}", sats as f64 / 100_000_000.0);
     let trimmed = text.trim_end_matches('0').trim_end_matches('.');
@@ -315,7 +291,7 @@ pub fn elapsed(d: std::time::Duration) -> String {
     format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
 }
 
-/// Thousands separators, so six-figure transaction counts stay readable.
+/// Thousands separators, so large counts stay readable.
 pub fn commas(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::new();

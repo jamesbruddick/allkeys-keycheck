@@ -33,6 +33,10 @@ upload = false
 # How many accounts of each phrase to scan. Every one is walked at the indices
 # above, exactly as account 0 is, so this multiplies the cost of the run. Lower
 # it for a large wordlist, where the per-phrase cost is what decides the run.
+#
+# A block rather than a ceiling: a phrase used on any account above 0 is
+# followed into the next block of this size, and the next, until one comes back
+# empty. Account 0 on its own buys nothing — every seed has it.
 # accounts = 10
 
 # How far each round follows a phrase that turned something up, in indices,

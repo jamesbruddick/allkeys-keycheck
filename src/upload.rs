@@ -1,7 +1,7 @@
 //! Submitting confirmed keys to allkeys.directory.
 //!
 //! Uploading a private key hands over spending authority and cannot be undone,
-//! so this never runs unless `--upload` asks for it explicitly.
+//! so this only runs when `--upload` asks for it.
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -18,15 +18,14 @@ const MAX_KEYS_PER_REQUEST: usize = 250;
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// Transient failures retry this many times before the upload is abandoned.
-/// Unlike the balance lookup, this one is bounded: a stuck upload should stop
-/// and let you retry deliberately rather than hold the keys in a loop forever.
+/// Bounded, unlike the balance lookup: a stuck upload should stop rather than
+/// hold the keys in a loop forever.
 const MAX_ATTEMPTS: u32 = 8;
 
 /// The server's reply, read for its two counts and nothing else.
 ///
-/// Both lists echo the keys back. They are deserialized as `IgnoredAny` so the
-/// hex is counted and discarded rather than parsed into owned `String`s that
-/// would then sit in memory, and could be printed, for the rest of the run.
+/// Both lists echo the keys back. `IgnoredAny` counts and discards them rather
+/// than holding the hex in memory for the rest of the run.
 #[derive(Debug, Deserialize)]
 struct SubmitResponse {
     #[serde(default)]
@@ -54,8 +53,8 @@ pub struct Summary {
     pub already_known: usize,
 }
 
-/// Send every key in batches. Returns once all of them have been accepted, or
-/// aborts with the server's own error message if the request was rejected.
+/// Send every key in batches, returning once all have been accepted or the
+/// server rejects the request.
 pub fn submit(keys: &[String], token: &str, ui: &Ui) -> Result<Summary, String> {
     let http = crate::http::client()?;
 
@@ -74,8 +73,8 @@ pub fn submit(keys: &[String], token: &str, ui: &Ui) -> Result<Summary, String> 
     Ok(summary)
 }
 
-/// One batch, with retries. Rejections that a retry cannot fix — a bad key, a
-/// bad token — fail immediately with the server's wording.
+/// One batch, with retries. Rejections a retry cannot fix — a bad key, a bad
+/// token — fail immediately with the server's wording.
 fn send(
     http: &reqwest::blocking::Client,
     keys: &[String],
@@ -107,8 +106,8 @@ fn send(
                     .map(|e| format!("{} ({})", e.error.message, e.error.code))
                     .unwrap_or_else(|_| text.trim().chars().take(160).collect());
 
-                // 429 and 503 are the documented retryable cases; every other
-                // 4xx means the request itself is wrong and will stay wrong.
+                // 429 and 503 are the documented retryable cases; any other
+                // 4xx means the request is wrong and will stay wrong.
                 let retryable =
                     status.as_u16() == 429 || status.as_u16() == 503 || status.is_server_error();
                 if !retryable {
@@ -123,10 +122,8 @@ fn send(
         };
 
         if attempt == MAX_ATTEMPTS {
-            // What is true whether or not `-o` was given: the input file is only
-            // emptied once every destination has taken its copy, and this
-            // failure returns well before that. Promising a local file here
-            // would be a lie to anyone uploading without one.
+            // The input is only drained once every destination has taken its
+            // copy, and this returns well before that.
             return Err(format!(
                 "upload failed after {MAX_ATTEMPTS} attempts — {retry_message}. \
                  The input file was left as it was, so the run can be repeated."

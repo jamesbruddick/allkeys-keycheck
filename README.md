@@ -68,7 +68,7 @@ Then point the tool at it, and say where the results should go:
 ```
 
 ```
-  allkeys-keycheck 0.7.4
+  allkeys-keycheck 0.7.5
 
          found  0 on file
       scanning  keys.txt · 1 key · 1 duplicate removed · 1 bad line removed
@@ -104,7 +104,7 @@ network request:
 ```
 
 ```
-  allkeys-keycheck 0.7.4
+  allkeys-keycheck 0.7.5
 
          found  0 on file
       scanning  keys.txt · 1 key · 1 phrase
@@ -141,8 +141,9 @@ branch is summarised by its two ends.
    hundreds or more for a phrase.
 3. **Query.** Addresses are batched into as few blockchain.info requests as the
    API allows and checked for transaction history.
-4. **Expand.** Phrases that turned something up are followed further down their
-   chains until the activity runs out. See [Expansion](#expansion).
+4. **Expand.** Phrases that turned something up are followed out into further
+   accounts and further down their chains until the activity runs out. See
+   [Expansion](#expansion).
 5. **Write.** Findings are merged into the ledger, into the `-o` file, and into
    the upload. Then the lines just scanned leave the input.
 
@@ -416,6 +417,32 @@ Each account is then **followed on its own evidence** — see
 [expansion](#expansion). A phrase with a busy account 0 and an untouched account
 2 grows the one and leaves the other exactly where the opening pass left it.
 
+`--accounts` is a **block, not a ceiling.** Activity on any account *above 0*
+says the seed was asked for more than one wallet, and a seed like that may have
+wallets past wherever the block happened to stop. So the next block of the same
+size is walked at the same span, and the next, until one comes back empty:
+
+| Block | Walked when |
+| --- | --- |
+| 0–9 | always |
+| 10–19 | something used in 0–9, on an account other than 0 |
+| 20–29 | something used in 10–19 |
+| … | … |
+
+Activity on **account 0 alone buys nothing** — it is the wallet every seed has,
+and it says nothing about whether a second was ever made. The block above is
+bought only by an account someone deliberately created.
+
+Two things follow from walking a block at a time. A phrase that finds nothing
+pays nothing, so this costs only where there is already something to find. And
+the scan cannot see past an empty block: a seed used on accounts 2 and 30, with
+nothing in 10–19, stops at 19. Name the range directly — `--accounts 40` — if
+you have reason to expect a gap that wide.
+
+Accounts turned up this way are ordinary accounts from there on: they are
+followed down their indices exactly as account 0 is. `--expand false` turns the
+account blocks off along with the rest.
+
 ### Choosing indices with `--indices`
 
 Within each chain, `i` is whatever `--indices` asks for.
@@ -473,6 +500,12 @@ same way an end is: a seed busy on account 0 and untouched on account 2 follows
 the one and leaves the other where the opening pass left it. Expansion is what
 pays for depth, and it only pays where there is something to go deeper into.
 
+**Accounts also expand outward, before any of this.** A phrase used on an
+account other than 0 buys the next block of `--accounts`, and the next, until a
+block comes back empty — see [`--accounts`](#choosing-accounts-with---accounts).
+Whatever those blocks turn up then joins the phrase and is followed down its
+indices exactly as account 0 is.
+
 Rounds run across every growing phrase at once, so a round costs a couple of
 requests whether one phrase is still growing or forty are:
 
@@ -486,9 +519,12 @@ entirely, so a count is scanned as exactly the indices it names — a fixed-cost
 pass over a large wordlist, where a single phrase that hits would otherwise keep
 the run going.
 
-Expansion applies to the **count form only**. Explicit windows are scanned as
-written and never grow, which is what makes `-i 400000..500000` safe as one
-shard of a larger scan. `--dry-run` never expands either.
+*Index* expansion applies to the **count form only**. Explicit windows are
+scanned as written and never grow, which is what makes `-i 400000..500000` safe
+as one shard of a larger scan. *Account* blocks are a separate axis and grow
+under either form — a window says what indices to scan, not how many wallets the
+seed has — so `--expand false` is what makes a run fixed-cost on both axes.
+`--dry-run` never expands at all.
 
 ### Passphrases
 
@@ -595,7 +631,7 @@ environment variables for anyone who prefers them.
 | `<FILE>` | `input` in config | Text file of keys and phrases, one per line |
 | **Scanning** | | |
 | `-i, --indices <INDICES>` | `10` | Which indices of each chain to scan — a count, or windows |
-| `-a, --accounts <N>` | `10` | How many accounts to scan, each at the full `--indices` span |
+| `-a, --accounts <N>` | `10` | Accounts per block, each at the full `--indices` span; blocks repeat while they find something above account 0 |
 | `--expand <N\|false>` | `100` | How far each expansion round reaches, or `false` to scan the count exactly |
 | `-p, --passphrase <WORD>` | config / `$BIP39_PASSPHRASE` | BIP39 passphrase, the optional 25th word |
 | `--dry-run` | — | Print derived addresses, contact no network |

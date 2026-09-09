@@ -1,10 +1,9 @@
 //! The output file: an accumulating record of everything ever found.
 //!
 //! A scan is usually one of many — a different slice of a wordlist, a wider
-//! `--indices`, a retry after a rate limit — and the findings of one run are not
+//! `--indices`, a retry after a rate limit — and one run's findings are not
 //! reproducible from the next. So the file is merged into rather than replaced:
-//! a re-run adds what is new, keeps what is already there, and never leaves you
-//! with fewer keys than you started with.
+//! a re-run adds what is new and keeps what was already there.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -15,8 +14,8 @@ use crate::keys;
 /// One secret in the file, with the comment lines that belong above it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
-    /// Lines beginning `#`, in file order. Scans do not write any; they exist
-    /// so that notes added to the file by hand survive being merged into.
+    /// Lines beginning `#`, in file order. Scans write none; they exist so
+    /// notes added by hand survive a merge.
     pub comments: Vec<String>,
     /// The secret itself, exactly as written. Empty for comments that trail at
     /// the end of a file with no secret under them.
@@ -39,8 +38,8 @@ pub struct Merged {
     pub updated: usize,
     /// Secrets already on file with nothing new to say about them.
     pub unchanged: usize,
-    /// Copies the file already held of a secret it also held earlier, folded
-    /// into that first copy and dropped.
+    /// Duplicate copies the file already held, folded into the first and
+    /// dropped.
     pub folded: usize,
 }
 
@@ -51,11 +50,8 @@ impl Merged {
     }
 }
 
-/// The identity two spellings of one secret share.
-///
-/// `0xAB…` and `ab…` are the same key, and a phrase respaced or recased is the
-/// same wallet — writing either twice would be a duplicate the file should not
-/// grow by.
+/// The identity two spellings of one secret share: `0xAB…` and `ab…` are one
+/// key, and a phrase respaced or recased is one wallet.
 pub fn identity(line: &str) -> String {
     let trimmed = keys::clean(line);
     if let Some(hex) = keys::normalize(trimmed) {
@@ -68,12 +64,11 @@ pub fn identity(line: &str) -> String {
         .to_lowercase()
 }
 
-/// Every secret the file holds, by identity: the set an input file is filtered
-/// against, so a secret already known to be active is never scanned twice.
+/// Every secret the file holds, by identity: the set an input is filtered
+/// against, so a secret known to be active is never scanned twice.
 ///
-/// Identities rather than lines, because the input's spelling of a secret is
-/// rarely the file's — the same rule that stops the file growing a second copy
-/// of a phrase is what recognizes that phrase when it turns up in an input.
+/// Identities rather than lines, since the input's spelling of a secret is
+/// rarely the file's.
 pub fn identities(records: &[Record]) -> HashSet<String> {
     records
         .iter()
@@ -82,9 +77,9 @@ pub fn identities(records: &[Record]) -> HashSet<String> {
         .collect()
 }
 
-/// Read the file back into records. A missing file is an empty list; anything
-/// else that fails to read is an error, because overwriting a file we could not
-/// read would destroy exactly what this module exists to protect.
+/// Read the file back into records. A missing file is an empty list; any other
+/// read failure is an error, since overwriting a file that could not be read
+/// would destroy exactly what this module exists to protect.
 pub fn load(path: &Path) -> Result<Vec<Record>, String> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(parse(&text)),
@@ -115,8 +110,7 @@ pub fn parse(text: &str) -> Vec<Record> {
             });
         }
     }
-    // Comments with no secret under them are kept rather than dropped: they are
-    // someone's notes, and this file is not ours to edit.
+    // Comments with no secret under them are someone's notes, so they are kept.
     if !comments.is_empty() {
         records.push(Record {
             comments,
@@ -141,17 +135,14 @@ pub fn render(records: &[Record]) -> String {
     out
 }
 
-/// Where a record sorts: keys first in ascending order, then anything that is
-/// not a key, then trailing comments.
+/// Where a record sorts: keys ascending, then anything that is not a key, then
+/// trailing comments.
 ///
-/// Keys sort on their normalized hex, so `0xAB…` files next to `ab…` rather
-/// than in a separate run of its own, and because every key is the same 64
-/// digits wide, comparing that text ascending *is* comparing the numbers.
+/// Keys sort on their normalized hex, so `0xAB…` files next to `ab…`; every key
+/// is the same 64 digits wide, so comparing that text is comparing the numbers.
 ///
-/// Phrases group by **word count** before spelling: 12-word phrases together,
-/// then 15, and so on. A phrase's length is the first thing anyone reading the
-/// file cares about, and mixing the lengths would interleave them into one
-/// undifferentiated block.
+/// Phrases group by word count before spelling — 12-word phrases together, then
+/// 15, and so on — rather than interleaving the lengths.
 fn order(record: &Record) -> (u8, usize, String) {
     if record.is_dangling() {
         return (2, 0, String::new());
@@ -166,10 +157,9 @@ fn order(record: &Record) -> (u8, usize, String) {
 }
 
 /// Give a record every comment from another naming the same secret, and say
-/// whether that taught it anything it did not already say.
+/// whether that added anything.
 ///
-/// Notes are added, never replaced: the line on file is the one that stays, and
-/// a second copy of a secret can only ever contribute to it.
+/// Notes are added, never replaced: the line on file is the one that stays.
 fn absorb(known: &mut Record, comments: Vec<String>) -> bool {
     let before = known.comments.len();
     for comment in comments {
@@ -185,17 +175,15 @@ fn absorb(known: &mut Record, comments: Vec<String>) -> bool {
 ///
 /// Merging alone cannot do this: it compares *incoming* records against the
 /// file, so two copies that arrive together — one file's findings pasted onto
-/// the end of another's, the usual way of merging two machines' results — are
-/// both already "existing" and never meet. So the file is folded onto itself
-/// first, and the later copy hands its notes to the first and goes.
+/// another's — are both already existing and never meet. Folding the file onto
+/// itself first hands the later copy's notes to the first.
 fn fold(records: Vec<Record>) -> (Vec<Record>, HashMap<String, usize>, usize) {
     let mut kept: Vec<Record> = Vec::with_capacity(records.len());
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut folded = 0;
 
     for record in records {
-        // Trailing comments name no secret, so there is no such thing as two
-        // copies of one: they are kept as they are, all of them.
+        // Trailing comments name no secret, so none of them is a duplicate.
         if record.is_dangling() {
             kept.push(record);
             continue;
@@ -216,14 +204,12 @@ fn fold(records: Vec<Record>) -> (Vec<Record>, HashMap<String, usize>, usize) {
 
 /// Fold new findings into what the file already holds.
 ///
-/// A secret already present is never rewritten, only extended with any comments
-/// the earlier run had not recorded. The result is sorted by key, so the file
-/// reads the same however many runs it took to build and a diff between two
-/// versions of it shows only what was actually added.
+/// A secret already present is never rewritten, only extended with comments the
+/// earlier run had not recorded. The result is sorted, so the file reads the
+/// same however many runs built it and a diff shows only what was added.
 ///
-/// Duplicates the file itself arrived with are folded away in the same pass, so
-/// a file edited by hand comes back tidy on the next run rather than keeping
-/// whatever was pasted into it forever.
+/// Duplicates the file arrived with are folded away in the same pass, so a file
+/// edited by hand comes back tidy on the next run.
 pub fn merge(existing: Vec<Record>, incoming: Vec<Record>) -> Merged {
     let (mut records, mut index, folded) = fold(existing);
 
@@ -252,19 +238,16 @@ pub fn merge(existing: Vec<Record>, incoming: Vec<Record>) -> Merged {
         }
     }
 
-    // Sorted last, once every record is in: the index above addresses records
-    // by position, so moving them before it is finished with would corrupt it.
+    // Sorted last: the index above addresses records by position, so moving
+    // them any earlier would corrupt it.
     records.sort_by_key(order);
     merged.records = records;
     merged
 }
 
-/// Write a file of private keys readable only by its owner.
-///
-/// `fs::write` would create it 0644 under the usual umask, leaving a list of
-/// spendable keys readable by every account on the machine. The mode is set at
-/// creation so there is no window where the file exists world-readable, and
-/// re-applied afterwards to tighten a file that already existed.
+/// Write a file of private keys readable only by its owner. `fs::write` would
+/// create it 0644 under the usual umask, leaving spendable keys readable by
+/// every account on the machine.
 pub fn save(path: &Path, records: &[Record]) -> Result<(), String> {
     use std::io::Write;
 
@@ -327,8 +310,7 @@ mod tests {
     #[test]
     fn earlier_findings_survive_a_later_run() {
         let first = merge(Vec::new(), vec![record(KEY, &[])]);
-        // A second run over a different input file entirely: the key from the
-        // first run must still be there afterwards.
+        // A second run over a different input: the first run's key must survive.
         let second = merge(first.records, vec![record(PHRASE, &[])]);
         assert_eq!(second.added, 1);
         assert_eq!(render(&second.records), format!("{KEY}\n{PHRASE}\n"));
@@ -379,8 +361,7 @@ mod tests {
         let merged = merge(pasted, Vec::new());
         assert_eq!((merged.folded, merged.added), (2, 0));
         assert_eq!(merged.secrets(), 2);
-        // The first spelling of each is the one that stays, and the note the
-        // second copy carried comes with it.
+        // The first spelling of each stays, with the second copy's note.
         assert_eq!(
             render(&merged.records),
             format!("{KEY}\n# from the laptop\n{PHRASE}\n")
@@ -432,9 +413,8 @@ mod tests {
     #[test]
     fn the_file_comes_out_sorted_lowest_key_first() {
         let key = |last: &str| format!("{}{last}", "0".repeat(63));
-        // Arrival order is deliberately backwards, and `0xA…` is written so
-        // that sorting the raw text would misplace it: `0` sorts before `f`,
-        // so an unnormalized sort would leave it first rather than middle.
+        // Arrival order is backwards, and `0xA…` is written so an unnormalized
+        // sort of the raw text would misplace it: `0` sorts before `f`.
         let decorated = format!("0x{}", key("A"));
         let merged = merge(
             Vec::new(),
@@ -454,10 +434,9 @@ mod tests {
 
     #[test]
     fn phrases_group_by_length_before_spelling() {
-        // Arrival order is deliberately wrong on both counts: the 24-word
-        // phrase comes first, and within each length the spellings are
-        // backwards. A plain alphabetical sort would leave "abandon…" first
-        // whatever its length, interleaving the two groups.
+        // Arrival order is wrong on both counts: the 24-word phrase first, and
+        // the spellings backwards within each length. A plain alphabetical sort
+        // would interleave the two groups.
         let short = |first: &str| format!("{first} {}", "abandon ".repeat(10) + "about");
         let long = |first: &str| format!("{first} {}", "abandon ".repeat(22) + "art");
         let merged = merge(
@@ -487,8 +466,8 @@ mod tests {
         let middle = format!("8{}", "0".repeat(63));
         let high = format!("{}e", "f".repeat(63));
         let first = merge(Vec::new(), vec![record(&middle, &[])]);
-        // KEY is the lowest key there is, so it has to land *above* the record
-        // already on file — appending would leave the file unsorted.
+        // KEY is the lowest there is, so it lands above the record already on
+        // file — appending would leave the file unsorted.
         let second = merge(first.records, vec![record(&high, &[]), record(KEY, &[])]);
         assert_eq!(second.added, 2);
         assert_eq!(

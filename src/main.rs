@@ -28,13 +28,14 @@ const LABEL_WIDTH: usize = 18;
 
 /// How many accounts a scan reaches by default.
 ///
-/// Account 0 is the wallet almost everyone has, and the nine above it cover the
-/// range anyone gets to by asking their wallet for another one. Reaching them
-/// is not cheap — every account is a whole further copy of the scan, paid on
-/// every phrase in the file whether it turns out to hold anything or not — but
-/// an account nobody looked at is a whole wallet missed, where a few unscanned
-/// indices are the tail of one. `--accounts 1` is the cheap pass over a large
-/// wordlist; this is the default because finding the wallet is the point.
+/// Every account is a further copy of the scan, paid on every phrase whether it
+/// holds anything or not — but an account nobody looked at is a whole wallet
+/// missed, where a few unscanned indices are only the tail of one. `--accounts
+/// 1` is the cheap pass over a large wordlist.
+///
+/// It is also the block size the scan grows by: a phrase used above account 0
+/// is followed ten accounts at a time until a block comes back empty, so this
+/// bounds what every phrase costs, not what a live seed can reach.
 const DEFAULT_ACCOUNTS: u32 = 10;
 
 /// How many rejected input lines to name before summarizing the rest.
@@ -44,19 +45,16 @@ const MAX_LISTED_REJECTS: usize = 5;
 /// than printing every line — a single mnemonic can derive tens of thousands.
 const MAX_LISTED_ADDRESSES: usize = 32;
 
-/// How many phrases one batch carries through the whole run by default —
-/// derived, queried, expanded and written — before the next batch starts.
+/// How many phrases one batch carries through the run by default — derived,
+/// queried, expanded and written — before the next batch starts.
 ///
-/// A phrase is hundreds of addresses at the default range, so a file of
-/// thousands of them would otherwise be held in memory all at once, and nothing
-/// would reach the output file until the last one had been queried. Bare keys
-/// are not counted: five addresses each is not what makes a run large.
-/// `--phrase-batch` overrides it.
+/// A phrase is hundreds of addresses at the default range, so without batching
+/// a large file would be held in memory at once and nothing would reach the
+/// output file until the last phrase was queried. Bare keys are not counted.
 const PHRASES_PER_BATCH: u64 = 100;
 
-/// Examples and the one rule a first run can trip over. Shown under both `-h`
-/// and `--help`: someone reaching for the short form is usually after the
-/// invocation, not the prose.
+/// Examples and the one rule a first run can trip over, shown under both `-h`
+/// and `--help`.
 const EXAMPLES: &str = "\
 Examples:
   allkeys-keycheck keys.txt -o active.txt  scan, save what has activity
@@ -72,18 +70,15 @@ also accumulate in found.txt, which the input is filtered against, so nothing is
 ever scanned twice. Lines that named no secret go to rejected.txt.";
 
 #[derive(Parser)]
-// `version` so a downloaded binary can say what it is: the run banner prints
-// it, but that needs an input file, and someone holding an archive they
-// unpacked a week ago wants the answer without starting a scan.
+// `version` so a downloaded binary can say what it is without starting a scan.
 //
 // Every long_help below is the short line plus the detail a run can go wrong
-// without — what is irreversible, what a value means. The
-// rest lives in the README, which has room to explain it.
+// without: what is irreversible, and what a value means. The rest is in the
+// README.
 #[command(
     version,
-    // Clap's own version flag is -V, and this replaces it with -v: the tool has
-    // no verbosity setting for -v to mean instead, and -v is what a hand
-    // reaches for. -V still works, unlisted, for anyone in the habit.
+    // Clap's version flag is -V; this replaces it with -v, since the tool has
+    // no verbosity setting. -V still works, unlisted.
     disable_version_flag = true,
     about = "Find which Bitcoin private keys and BIP39 mnemonic phrases have active addresses",
     long_about = "Find which Bitcoin private keys and BIP39 mnemonic phrases have active \
@@ -115,10 +110,8 @@ struct Args {
     /// like 10..110
     //
     // From here down every option carries a help_heading, so `--help` reads as
-    // four short lists — what to scan, where results go, how hard to push the
-    // network, and the file underneath it all — rather than one column of
-    // fifteen. Fields are ordered to match, since a heading lists its options
-    // in declaration order.
+    // four short lists rather than one column of fifteen. Fields are ordered to
+    // match, since a heading lists its options in declaration order.
     ///
     /// A bare count scans that many indices at each end of the chain: `10`
     /// means `0..10` and the last ten. Both ends, because the index space runs
@@ -130,9 +123,8 @@ struct Args {
     /// and nothing more: `10..110`, or `400000..500000` for one shard of a
     /// larger scan. An omitted start means 0, an omitted end the end of the
     /// space.
-    // A plain placeholder, with the two forms named in the line above instead:
-    // spelling the grammar out here made this the widest option in the list,
-    // and the widest option sets the description column for every other one.
+    // A plain placeholder, with the two forms named in the line above: the
+    // widest option sets the description column for every other one.
     #[arg(
         short = 'i',
         long,
@@ -156,6 +148,12 @@ struct Args {
     ///
     /// Each account is then followed on its own evidence: an account that turns
     /// something up is expanded, and the ones that stay empty are not.
+    ///
+    /// This is a block rather than a ceiling. Activity on any account above 0
+    /// says the seed was asked for more than one wallet, so the next block of
+    /// the same size is walked at the same span, and so on until a block comes
+    /// back empty. Activity on account 0 alone buys nothing: it is the wallet
+    /// every seed has. `--expand false` turns that off with the rest.
     #[arg(
         short = 'a',
         long,
@@ -340,7 +338,7 @@ struct Args {
     phrase_batch: u64,
 
     /// blockchain.info API key, if you have one (raises the rate limit)
-    // hide_env_values: clap prints an env var's CURRENT VALUE in --help, which
+    // hide_env_values: clap prints an env var's current value in --help, which
     // would put a live secret on screen and into any pasted output.
     #[arg(
         long,
@@ -367,16 +365,16 @@ struct Args {
     init_config: bool,
 
     /// Print version
-    // Never read: the action prints and exits during parsing. The field exists
-    // because the derive needs somewhere to hang the argument.
+    // Never read: the action prints and exits during parsing. The field is
+    // only somewhere for the derive to hang the argument.
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
 }
 
 fn main() -> ExitCode {
-    // Parsed through the matches rather than `Args::parse()`, because merging
-    // the config file underneath needs to know which values the user actually
-    // supplied and which are clap's own defaults. See `merge_config`.
+    // Parsed through the matches rather than `Args::parse()`: merging the
+    // config file underneath needs to know which values the user supplied and
+    // which are clap's defaults. See `merge_config`.
     let matches = Args::command().get_matches();
     let mut args = match Args::from_arg_matches(&matches) {
         Ok(args) => args,
@@ -418,10 +416,10 @@ fn main() -> ExitCode {
 }
 
 /// Read the config file and fill in everything the command line and the
-/// environment left at its default. Returns the file's path, if there was one.
+/// environment left at a default. Returns the file's path, if there was one.
 fn load_config(args: &mut Args, matches: &clap::ArgMatches) -> Result<Option<PathBuf>, String> {
-    // --init-config writes the file; reading one first would only turn a
-    // typo in an existing config into a failure to create a new one.
+    // --init-config writes the file; reading one first would turn a typo in an
+    // existing config into a failure to create a new one.
     if args.init_config {
         return Ok(None);
     }
@@ -433,8 +431,7 @@ fn load_config(args: &mut Args, matches: &clap::ArgMatches) -> Result<Option<Pat
 }
 
 /// True when the user supplied nothing for this argument — no flag, no
-/// environment variable — which is exactly when the config file gets a say.
-/// What is left is clap's own default, or nothing at all for an optional one.
+/// environment variable — which is when the config file gets a say.
 fn unset(matches: &clap::ArgMatches, id: &str) -> bool {
     use clap::parser::ValueSource::{CommandLine, EnvVariable};
     !matches!(
@@ -443,9 +440,9 @@ fn unset(matches: &clap::ArgMatches, id: &str) -> bool {
     )
 }
 
-/// Layer the file under what was already given. Command line → environment →
-/// file → default, weakest last, so a stale line in the file can never
-/// override a flag typed on the spot.
+/// Layer the file under what was already given: command line → environment →
+/// file → default, so a stale line in the file cannot override a flag typed on
+/// the spot.
 fn merge_config(
     args: &mut Args,
     matches: &clap::ArgMatches,
@@ -534,21 +531,19 @@ fn merge_config(
     {
         args.delay = delay;
     }
-    // `--delay` is older than concurrency and means one thing: slow this scan
-    // down. It is applied by the worker that made the request, so eight of them
-    // each honouring a 2s pause is eight times the request rate that same
-    // setting used to buy — the one control for going easy on the endpoint,
-    // quietly weakened by a default the user never chose. So a delay that was
-    // asked for without a concurrency to go with it still means one request at
-    // a time, exactly as it did before. Asking for both is another matter: that
-    // is someone who has read what each does and wants a paced eight.
+    // `--delay` predates concurrency and means one thing: slow this scan down.
+    // It is applied per worker, so eight of them each honouring a 2s pause is
+    // eight times the request rate the same setting used to buy — the one
+    // control for going easy on the endpoint, weakened by a default nobody
+    // chose. So a delay asked for without a concurrency still means one request
+    // at a time. Asking for both is someone who wants a paced eight.
     let delay_asked = !unset(matches, "delay") || config.delay.is_some_and(|d| d > 0);
     let concurrency_asked = !unset(matches, "concurrency") || config.concurrency.is_some();
     if args.delay > 0 && delay_asked && !concurrency_asked {
         args.concurrency = 1;
     }
-    // A flag is either passed or not, so the file can only ever turn one on —
-    // `upload = false` in the file cannot undo a `-u` on the command line.
+    // A flag is passed or not, so the file can only turn one on: `upload =
+    // false` cannot undo a `-u` on the command line.
     args.upload |= unset(matches, "upload") && config.upload.unwrap_or(false);
     args.dry_run |= unset(matches, "dry_run") && config.dry_run.unwrap_or(false);
 
@@ -567,16 +562,15 @@ fn merge_config(
     Ok(())
 }
 
-/// The token an upload will be authenticated with, or `None` when this run will
-/// not be uploading anything.
+/// The token an upload will be authenticated with, or `None` when this run is
+/// not uploading.
 ///
-/// Resolved before the scan rather than after it, so a missing token costs
-/// nothing instead of surfacing once the lookup has already run.
+/// Resolved before the scan, so a missing token costs nothing rather than
+/// surfacing once the lookup has run.
 ///
-/// `--dry-run` contacts no network and so never uploads, whatever else was
-/// asked for: it must not be held up by a token it will never spend. That
-/// matters because `upload = true` is a reasonable thing to leave in a config
-/// file, and a dry run is exactly what you reach for before a real one.
+/// `--dry-run` contacts no network and never uploads, so it is not held up by a
+/// token it will never spend — `upload = true` is a reasonable thing to leave
+/// in a config file, and a dry run is what you reach for before a real one.
 fn upload_token(args: &Args) -> Result<Option<String>, String> {
     match (args.upload && !args.dry_run, &args.allkeys_api_key) {
         (true, Some(key)) => Ok(Some(key.clone())),
@@ -599,21 +593,17 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
             config::DEFAULT_FILE
         )
     })?;
-    // The config first, because it is what everything under it was decided by:
-    // a run that reads unexpectedly is most often reading a file the person who
-    // started it forgot was there. The path only, never a value — this output
-    // gets pasted into bug reports.
+    // The config first, since it decides everything under it: a run that
+    // behaves unexpectedly is most often reading a file someone forgot was
+    // there. The path only, never a value — this output gets pasted around.
     if let Some(path) = config_file {
         ui.row("config", &path.display().to_string());
     }
     // A scan whose results go nowhere is almost always a mistake, so it is
-    // refused up front. --dry-run is exempt: it runs no scan, and already says
-    // where its output goes.
+    // refused up front; --dry-run is exempt, since it runs no scan.
     //
-    // The ledger does not settle this. It is the run's memory — what stops the
-    // same secret being looked up twice — not a destination anyone chose, and a
-    // run that only fed it would still be one whose results the person who
-    // started it never asked to keep.
+    // The ledger does not settle this: it is the run's memory, what stops a
+    // secret being looked up twice, not a destination anyone chose.
     if !args.dry_run && args.output.is_none() && !args.upload {
         return Err(format!(
             "results need somewhere to go: pass -o <file> to save them, --upload to submit \
@@ -624,10 +614,8 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
 
     let upload_token = upload_token(args)?;
 
-    // Read before the input is, because it decides what the input is worth:
-    // what is on file here will not be looked up again. Reported before it too,
-    // so the rows read in the order the run actually works in — the file it
-    // remembers, then the file it is about to read against it.
+    // Read before the input, since what is on file here will not be looked up
+    // again. Reported first too, so the rows read in working order.
     let ledger = open_ledger(args, ui)?;
 
     let text = fs::read_to_string(input)
@@ -636,23 +624,19 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     let mut parsed = parse_input(&text, &args.passphrase, ui)?;
 
     // Filtered before the counts below, so the run reports the scan it is
-    // actually about to do rather than the one the file asked for. The lines it
-    // takes out go with the bad ones further down.
+    // about to do rather than the one the file asked for.
     let known = drop_known(&mut parsed.inputs, &ledger);
     let already = known.secrets;
 
     let count = parsed.inputs.len();
 
-    // Related figures share one line, separated by a middot, so the run reads
-    // as a handful of rows rather than a column of one-fact lines. The file's
-    // name leads them: naming it on a row of its own said one thing and then
-    // waited for the parse to say what was in it, and the two only ever read as
-    // one sentence.
+    // Related figures share one line, separated by a middot, led by the file's
+    // name — the two only read as one sentence.
     //
     // Both kinds are named in the value rather than one of them in the label:
-    // the two are scanned differently — keys in a single pass, phrases in
-    // batches — so which of them a file holds is the useful fact, and a label
-    // that changed with the mix made the same run read differently every time.
+    // keys and phrases are scanned differently, so which a file holds is the
+    // useful fact, and a label that changed with the mix would make the same
+    // run read differently every time.
     let phrases = parsed.phrases();
     let keys = count - phrases;
     let mut facts = Vec::new();
@@ -666,8 +650,7 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
             plural(phrases)
         ));
     }
-    // A file of nothing but blanks and comments has no fact to report, and the
-    // row still has to say something.
+    // A file of only blanks and comments still has to say something.
     if facts.is_empty() && parsed.rejected.is_empty() && already == 0 {
         facts.push("nothing to scan".to_string());
     }
@@ -676,9 +659,8 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
             "{} duplicate{} {}",
             ui::commas(parsed.duplicates as u64),
             plural(parsed.duplicates),
-            // Collapsed either way — one secret is scanned once however many
-            // lines named it. On a real run the spare lines also leave the file
-            // straight away, which is a different thing to have been told.
+            // Collapsed either way; on a real run the spare lines also leave
+            // the file straight away.
             match args.dry_run {
                 true => "collapsed",
                 false => "removed",
@@ -711,15 +693,14 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
             }
         ));
     }
-    // The file's name and its contents are both the row's substance, so both
-    // stay bright and only the middots between them are dimmed — unlike the
-    // `found` rows, where the file's bookkeeping really is an aside.
+    // Name and contents are both the row's substance, so both stay bright and
+    // only the middots are dimmed — unlike the `found` rows, where the file's
+    // bookkeeping is an aside.
     let mut row = vec![input.display().to_string()];
     row.append(&mut facts);
     ui.row("scanning", &row.join(&ui.dim(" · ")));
 
-    // Only a sample: a file with thousands of bad lines would otherwise push
-    // the results off the screen entirely.
+    // A sample only: thousands of bad lines would push the results off screen.
     for bad in parsed.rejected.iter().take(MAX_LISTED_REJECTS) {
         ui.cont(&format!("line {}: {}", bad.number, bad.reason));
     }
@@ -739,27 +720,17 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
 
     let mut queue = Queue::new(input, &text);
 
-    // Before the scan rather than after it, for the three kinds of line that
-    // will never be scanned in their own right: one that named no secret at
-    // all, one that repeated a secret an earlier line already named, and one
-    // naming a secret the ledger already holds. Leaving any of them in the
-    // queue would mean every run from here on reading it, reporting it and
-    // stepping over it again.
+    // Before the scan, for the three kinds of line that will never be scanned
+    // in their own right: one naming no secret, one repeating a secret an
+    // earlier line named, and one naming a secret the ledger already holds.
+    // Leaving them would mean every future run reading and reporting them.
     //
-    // A line already on file can go this early for the same reason a bad one
-    // can: the rule that nothing leaves the input until it is safely somewhere
-    // else is already satisfied for it — being somewhere else is exactly what
-    // took it out.
+    // None of this weakens the rule that nothing leaves the input until it is
+    // safely somewhere else. A line already on file is somewhere else, and a
+    // repeat holds no secret of its own — the line it repeats stays put until
+    // the batch carrying it is written and uploaded.
     //
-    // A repeat can go this early without weakening the rule that nothing leaves
-    // the file until it is safely somewhere else, because that rule is about
-    // secrets and a repeat holds no secret of its own. The line it repeats stays
-    // exactly where it was until the batch carrying it is written and uploaded,
-    // so an interrupted run still has every secret it started with — just once
-    // each instead of twice.
-    //
-    // Both go in a single write: two drains would rewrite the file twice, and
-    // the second would be re-reading what the first had just put there.
+    // Both go in one write: two drains would rewrite the file twice.
     if !args.dry_run {
         let mut spent: Vec<usize> = parsed.rejected.iter().map(|line| line.number).collect();
         spent.extend(&known.lines);
@@ -771,26 +742,22 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         );
         if !spent.is_empty() {
             queue.drain(&spent, ui)?;
-            // Gone from the file, so no longer this secret's to take with it
-            // when its batch finishes.
+            // Gone from the file, so not this secret's to take with it when
+            // its batch finishes.
             for input in &mut parsed.inputs {
                 input.repeats.clear();
             }
         }
     }
 
-    // After the rows above, not before them: a file with nothing usable in it is
-    // the one case where knowing *which* lines were unreadable matters most, and
-    // failing at the parse would report the count and name none of them. The bad
-    // lines leave the file first, for the same reason they always do.
+    // After the rows above: a file with nothing usable is the case where
+    // knowing which lines were unreadable matters most, and failing at the
+    // parse would report the count and name none of them.
     if parsed.inputs.is_empty() {
-        // Nothing to scan because it has all been scanned before is a finished
-        // run, not a failure: the input held real secrets, and the answer for
-        // every one of them was already on file.
+        // An input already fully scanned is a finished run, not a failure.
         if already > 0 {
-            // Nothing more to say: the `found` row above already reported the
-            // file this input turned out to be entirely contained by, and it
-            // was folded and sorted on the way to reporting it.
+            // The `found` row above already reported the file this input turned
+            // out to be contained by.
             println!();
             return Ok(());
         }
@@ -800,13 +767,12 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         ));
     }
 
-    // One batch at a time, all the way through: a batch that finds something
-    // has it on disk before the next one starts, and only one batch's worth of
-    // addresses is ever held in memory.
+    // One batch at a time, all the way through: findings are on disk before
+    // the next batch starts, and only one batch of addresses is in memory.
     let batches = in_batches(parsed.inputs, args.phrase_batch as usize);
     let total = batches.len();
-    // The keys are one pass however many there are, so numbering runs over the
-    // phrase batches only — those are the ones a reader is counting down.
+    // Keys are one pass however many there are, so only the phrase batches are
+    // numbered.
     let numbered = batches.iter().filter(|b| holds_phrases(b)).count();
 
     let client = match args.dry_run {
@@ -826,15 +792,14 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
     let plan = hd::Plan::opening(&args.indices, args.accounts);
 
     for batch in batches {
-        // Only worth a heading when there is more than one: a single batch is
-        // just "the run", and a heading over the whole of it says nothing.
+        // Only worth a heading when there is more than one batch.
         if total > 1 {
             ui.gap();
             ui.row("batch", &heading(&batch, &mut numbering, numbered, ui));
         }
 
-        // Noted before `derive_all` consumes the batch: these are the lines
-        // that leave the input once the batch is done with.
+        // Noted before `derive_all` consumes the batch: these lines leave the
+        // input once the batch is done.
         let scanned: Vec<usize> = batch.iter().flat_map(Input::lines).collect();
         let (mut entries, phrases_by_entry) = derive_all(batch, &plan, ui)?;
 
@@ -845,9 +810,26 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
 
         let mut hits = check(client, &entries, args, ui)?;
 
-        // A count span is a starting point, so the phrases that turned something
-        // up are followed further out. Explicit windows are taken as written,
-        // and `--expand false` asks for a count to be taken that way too.
+        // Accounts before indices: `--accounts` is a block, not a limit, so a
+        // phrase used above account 0 is followed into the blocks above first.
+        // What that turns up joins the entry, which is where the index
+        // expansion below reads its accounts from.
+        if args.expand.step().is_some() {
+            let batch = args.api_batch;
+            expand_accounts_with(
+                &mut entries,
+                &phrases_by_entry,
+                &mut hits,
+                &args.indices,
+                args.accounts,
+                ui,
+                |addresses| query(client, addresses, batch, "expanding accounts", ui),
+            )?;
+        }
+
+        // A count span is a starting point, so phrases that turned something up
+        // are followed further out. Explicit windows are taken as written, and
+        // `--expand false` asks for a count to be taken that way too.
         if let (Some(start), Some(step)) = (args.indices.count(), args.expand.step()) {
             let batch = args.api_batch;
             expand_with(
@@ -864,15 +846,14 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         let active = write_results(&entries, &hits, args, ui)?;
         found += active.len();
 
-        // Every batch sends its own findings, so a run interrupted halfway has
-        // already submitted what it found up to there.
+        // Every batch sends its own findings, so an interrupted run has already
+        // submitted what it found up to that point.
         if let (Some(token), false) = (&upload_token, active.is_empty()) {
             upload_keys(&active, token, ui)?;
         }
 
-        // Last, once every destination has taken its copy of this batch:
-        // anything that failed above returned instead, leaving these lines in
-        // the input so the run can be repeated.
+        // Last, once every destination has taken its copy: anything that failed
+        // above returned instead, leaving these lines in the input.
         queue.drain(&scanned, ui)?;
     }
 
@@ -896,22 +877,18 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
         );
     }
 
-    // Both said once, at the end, rather than repeated under every batch that
-    // happened to find something. On a single-batch run that puts them exactly
-    // where they were before there was any batching.
+    // Said once at the end rather than under every batch that found something.
     if upload_token.is_some() && found == 0 {
         ui.row("upload", "nothing to send");
     } else if upload_token.is_none() && found > 0 {
-        // Reaching here means an output file was given: the two are required to
-        // be mutually exhaustive, so the only missing destination is the upload.
+        // Reaching here means an output file was given — the two are required
+        // to be exhaustive — so the only missing destination is the upload.
         ui.cont("not uploaded — pass -u to submit these to allkeys.directory");
     }
 
-    // The input is a queue, so what is left in it is the state the next run
-    // starts from — worth stating, whether that is nothing or a remainder the
-    // run never scanned. Skipped when the file stopped being this run's to
-    // describe: the warning at the time said so, and a count taken from a copy
-    // that is no longer what is on disk would be worse than no count at all.
+    // The input is a queue, so what is left is the state the next run starts
+    // from. Skipped once the file stopped being this run's to describe: a count
+    // taken from a stale copy would be worse than no count.
     if !args.dry_run && queue.draining() {
         let left = queue.remaining();
         ui.row(
@@ -937,16 +914,14 @@ fn run(args: &Args, ui: &Ui, config_file: Option<&Path>) -> Result<(), String> {
 
 /// The input file as a queue, drained a batch at a time.
 ///
-/// A batch that has been written and uploaded is done with, so the lines it
-/// came from leave the file and the next run starts on what is left. Bad lines
-/// go before the scan even begins, since nothing will ever be scanned from
-/// them. Comments and blanks stay exactly where they are.
+/// A batch that has been written and uploaded is done with, so its lines leave
+/// the file and the next run starts on what is left. Bad lines go before the
+/// scan begins; comments and blanks stay where they are.
 ///
-/// Removal is by line number against a copy held here, rather than by matching
-/// text on disk, because two lines can hold the same secret written two ways and
-/// both have to go. What was last written is kept so an edit made by someone
-/// else can be spotted: the file is then left alone for the rest of the run
-/// rather than being rewritten over the top of their change.
+/// Removal is by line number against a copy held here rather than by matching
+/// text on disk, since two lines can hold the same secret written two ways.
+/// What was last written is kept so an edit by anything else can be spotted,
+/// after which the file is left alone rather than written over.
 struct Queue {
     path: PathBuf,
     /// By original line number, `None` once that line has been scanned.
@@ -972,9 +947,9 @@ impl Queue {
             return Ok(());
         }
 
-        // Checked every time, not once at the start: the file is being rewritten
-        // as the run goes, so the only thing that proves nobody else has touched
-        // it is that what is there is what this run last put there.
+        // Checked every time: the file is rewritten as the run goes, so the
+        // only proof nobody else touched it is that what is there is what this
+        // run last put there.
         let current = fs::read_to_string(&self.path)
             .map_err(|e| format!("could not re-read {}: {e}", self.path.display()))?;
         if current != self.on_disk {
@@ -1009,26 +984,25 @@ impl Queue {
     }
 
     /// How many lines are still in the file. Only meaningful while this run is
-    /// still the only thing writing to it — see `draining`.
+    /// the only thing writing to it — see `draining`.
     fn remaining(&self) -> usize {
         self.lines.iter().flatten().count()
     }
 
-    /// Whether the input is still this run's to drain. False once someone else
-    /// has edited it, after which the file is left alone and nothing here
-    /// describes what is in it.
+    /// Whether the input is still this run's to drain. False once anything else
+    /// has edited it, after which the file is left alone.
     fn draining(&self) -> bool {
         self.draining
     }
 }
 
-/// Split the input into batches: every bare key first, in one batch of its own,
-/// then the phrases `per_batch` at a time.
+/// Split the input into batches: every bare key first, in one batch, then the
+/// phrases `per_batch` at a time.
 ///
 /// Keys go first because they are cheap — five addresses each, one request for
-/// thousands of them — so putting them up front gets that whole part of the
-/// input answered and on disk before the expensive part begins. And they are
-/// never split: what makes a run large is phrases.
+/// thousands — so that part of the input is answered and on disk before the
+/// expensive part begins. They are never split; phrases are what make a run
+/// large.
 fn in_batches(inputs: Vec<Input>, per_batch: usize) -> Vec<Vec<Input>> {
     // Stable, so within each group the file's order survives.
     let (keys, phrases): (Vec<Input>, Vec<Input>) = inputs
@@ -1051,8 +1025,8 @@ fn in_batches(inputs: Vec<Input>, per_batch: usize) -> Vec<Vec<Input>> {
         batches.push(current);
     }
 
-    // An input of nothing at all is still one batch, which reports an empty
-    // scan rather than silently doing nothing.
+    // An empty input is still one batch, so the run reports an empty scan
+    // rather than doing nothing silently.
     if batches.is_empty() {
         batches.push(Vec::new());
     }
@@ -1069,10 +1043,8 @@ fn holds_phrases(batch: &[Input]) -> bool {
 /// The heading over one batch: what it holds, and for a phrase batch how far
 /// through the phrases it is.
 ///
-/// The keys are a single pass whatever their number, so they get a count and no
-/// position — there is nothing for them to be first of. Only the phrase batches
-/// are numbered, and only when there is more than one of them: "1 of 1" is a
-/// position that answers a question nobody asked.
+/// Keys are a single pass whatever their number, so they get a count and no
+/// position. Phrase batches are numbered only when there is more than one.
 fn heading(batch: &[Input], numbering: &mut usize, numbered: usize, ui: &Ui) -> String {
     let size = ui::commas(batch.len() as u64);
 
@@ -1093,14 +1065,11 @@ fn heading(batch: &[Input], numbering: &mut usize, numbered: usize, ui: &Ui) -> 
     )
 }
 
-/// Submit the found keys. Passing `--upload` is the confirmation; nothing is
-/// sent without it.
+/// Submit the found keys. Passing `--upload` is the confirmation.
 ///
-/// The keys are counted, never listed. An upload is the one thing that puts a
-/// private key somewhere other than this machine, and printing the same keys to
-/// stdout on the way past would put them somewhere else again — a scrollback
-/// buffer, a piped log file, a pasted terminal session. The counts say what
-/// happened; the output file is where the keys themselves belong.
+/// The keys are counted, never listed: printing them on the way past would put
+/// them in a scrollback buffer, a piped log, or a pasted terminal session. The
+/// counts say what happened; the output file holds the keys.
 fn upload_keys(active: &[String], token: &str, ui: &Ui) -> Result<(), String> {
     let summary = upload::submit(active, token, ui)?;
     let mut facts = vec![format!(
@@ -1118,11 +1087,9 @@ fn upload_keys(active: &[String], token: &str, ui: &Ui) -> Result<(), String> {
     Ok(())
 }
 
-/// What to call the things this input file holds, pluralized for `count`.
-///
-/// A file of mnemonics reported in "keys" is misleading, and calling either one
-/// a "secret" tells the reader nothing they didn't already know. Only a file
-/// holding both needs a word that covers both.
+/// What to call the things this input holds, pluralized for `count`. A file of
+/// mnemonics reported in "keys" would be misleading, and only a file holding
+/// both needs a word covering both.
 fn noun(entries: &[KeyEntry], count: usize) -> &'static str {
     let phrases = entries.iter().filter(|e| e.is_phrase()).count();
     match (phrases, count == 1) {
@@ -1145,9 +1112,9 @@ fn label_width(labels: impl Iterator<Item = usize>) -> usize {
     labels.max().unwrap_or(0).max(LABEL_WIDTH)
 }
 
-/// The derivations that share a path prefix, in the order they were derived.
-/// A mnemonic's addresses come out grouped by chain already, so consecutive
-/// runs are exactly the groups worth summarizing.
+/// The derivations sharing a path prefix, in derivation order. A mnemonic's
+/// addresses come out grouped by chain, so consecutive runs are the groups
+/// worth summarizing.
 fn by_branch(addresses: &[Derived]) -> Vec<(&str, &[Derived])> {
     fn branch(derived: &Derived) -> &str {
         match &derived.path {
@@ -1171,13 +1138,12 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
         ui.gap();
         ui.row(&entry.label(), &ui.bold(&entry.display));
 
-        // A key has five addresses and they all fit; a mnemonic has thousands,
-        // so each branch is summarized by its ends instead of listed in full.
+        // A key's five addresses all fit; a mnemonic has thousands, so each
+        // branch is summarized by its ends instead.
         if entry.addresses.len() <= MAX_LISTED_ADDRESSES {
             let width = label_width(entry.addresses.iter().map(|d| d.label().len()));
             for derived in &entry.addresses {
-                // Pad before coloring: escape codes would otherwise count
-                // toward the field width and break the columns.
+                // Pad before coloring, or the escape bytes eat the field width.
                 ui.cont(&format!(
                     "{} {}",
                     ui.dim(&format!("{:<width$}", derived.label())),
@@ -1189,10 +1155,9 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
 
         let groups = by_branch(&entry.addresses);
 
-        // The sample rows carry a path and an encoding, and the two are
-        // measured separately: an index runs from one digit to ten, so padding
-        // them as one string lines the addresses up while leaving the encodings
-        // between them ragged.
+        // Path and encoding are measured separately: an index runs from one
+        // digit to ten, so padding them as one string would line the addresses
+        // up but leave the encodings between them ragged.
         let samples = || {
             groups
                 .iter()
@@ -1205,11 +1170,9 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
             .unwrap_or(0);
         let kind_width = label_width(samples().map(|d| d.kind.label().len()));
 
-        // A branch heads a block of sample rows that are indented one step
-        // further, so its count is padded past the path column *and* that step
-        // — landing in the same column the samples put their encoding in. The
-        // alternative is a count that stops short of a column it nearly
-        // reaches, which reads as a misprint rather than as a different row.
+        // A branch heads a block of sample rows indented one step further, so
+        // its count is padded past the path column and that step, landing in
+        // the column the samples put their encoding in.
         let branch_width = path_width + ui::DETAIL_INDENT;
 
         for (branch, rows) in groups {
@@ -1218,8 +1181,7 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
                 ui.dim(&format!("{branch:<branch_width$}")),
                 ui.dim(&format!("{} addresses", ui::commas(rows.len() as u64)))
             ));
-            // The two ends of the branch: the first index scanned and the last,
-            // which is the whole point of scanning a tail at all.
+            // The two ends of the branch: the first index scanned and the last.
             for derived in [rows.first(), rows.last()].into_iter().flatten() {
                 let path = derived.path.as_deref().unwrap_or_default();
                 ui.detail(&format!(
@@ -1233,30 +1195,28 @@ fn show_addresses(entries: &[KeyEntry], ui: &Ui) {
     }
 }
 
-/// How many lines one round of reading hands out. Stretching a phrase's seed
-/// is a millisecond of hashing, so a round of these is long enough to be worth
+/// How many lines one round of reading hands out. Stretching a phrase's seed is
+/// a millisecond of hashing, so a round of these is long enough to be worth
 /// scheduling and short enough to keep the progress bar moving.
 const LINES_PER_ROUND: usize = 512;
 
 /// How many items to hand out per round of derivation, given how many keys each
-/// one produces. Sized by the keys rather than by the phrases: one phrase over
-/// a wide span is a round on its own, while a wordlist scanned an index deep
-/// needs hundreds of phrases before a round is worth starting. The cap is what
-/// keeps a round's finished keys — which are held in memory until the round is
-/// taken — bounded.
+/// produces. Sized by keys rather than phrases: one phrase over a wide span is
+/// a round on its own, while a wordlist scanned an index deep needs hundreds
+/// before a round is worth starting. The cap bounds the finished keys held in
+/// memory until a round is taken.
 fn round_of(keys_per_item: usize) -> usize {
     const KEYS_PER_ROUND: usize = 1 << 18;
     (KEYS_PER_ROUND / keys_per_item.max(1)).clamp(1, 1024)
 }
 
-/// Run `work` over the items in parallel, a round at a time, handing each
-/// result to `take` on this thread in the order the items were given.
+/// Run `work` over the items in parallel, a round at a time, handing each result
+/// to `take` on this thread in the order the items were given.
 ///
-/// That order is what the sequential loops this replaces were quietly
-/// providing, and every caller depends on it: which entry a phrase becomes,
-/// which line a rejection names, which order the derived keys come out in.
-/// Rounds are what make it compatible with a progress bar, and what keeps the
-/// finished work waiting in memory to one round's worth.
+/// Every caller depends on that order: which entry a phrase becomes, which line
+/// a rejection names, which order the derived keys come out in. Rounds are what
+/// make it compatible with a progress bar and bound the finished work held in
+/// memory.
 fn in_rounds<T, R>(
     items: &[T],
     round: usize,
@@ -1286,10 +1246,9 @@ where
 struct Input {
     /// Line number in the input file, so a failure below can name it.
     number: usize,
-    /// Every other line that named the same secret — the duplicates this one
-    /// stood in for. They leave the input before the scan starts, along with the
-    /// lines that named no secret at all, and this is emptied when they do; it
-    /// is the list of what to take out, not a record kept for later.
+    /// Every other line naming the same secret. They leave the input before the
+    /// scan starts, and this is emptied when they do — it is the list of what
+    /// to take out, not a record kept for later.
     repeats: Vec<usize>,
     /// The line as it was written, for the output file to echo back.
     raw: String,
@@ -1304,18 +1263,16 @@ impl Input {
 }
 
 enum InputKind {
-    /// A parsed phrase, seed and all. Kept rather than re-parsed later so that
-    /// stretching the seed — the expensive half of reading a wordlist — is paid
-    /// for once, whatever the run goes on to do with it.
+    /// A parsed phrase, seed and all. Kept rather than re-parsed so stretching
+    /// the seed — the expensive half of reading a wordlist — is paid for once.
     Phrase(hd::Phrase),
     /// A hex key, normalized.
     Key(String),
 }
 
 impl InputKind {
-    /// What decides whether this line is a repeat of an earlier one: the seed
-    /// for a phrase, since two spellings of one phrase are one wallet, and the
-    /// normalized hex for a key.
+    /// What decides whether this line repeats an earlier one: the seed for a
+    /// phrase, since two spellings are one wallet, the normalized hex for a key.
     fn id(&self) -> String {
         match self {
             Self::Phrase(phrase) => phrase.id(),
@@ -1324,13 +1281,11 @@ impl InputKind {
     }
 }
 
-/// What one line holds, as far as can be decided from the line alone.
+/// What one line holds, as far as the line alone decides.
 ///
-/// Self-contained on purpose: this is the expensive part of reading an input
-/// file — a phrase's seed is 2048 rounds of HMAC-SHA512 — and it is what gets
-/// run in parallel. Everything that depends on the rest of the file, which
-/// lines are duplicates and what order the survivors end up in, is decided by
-/// the caller afterwards.
+/// Self-contained because this is the expensive part of reading an input file —
+/// a phrase's seed is 2048 rounds of HMAC-SHA512 — and so the part run in
+/// parallel. Anything depending on the rest of the file is left to the caller.
 fn classify(line: &str, passphrase: &str) -> Result<InputKind, String> {
     if hd::looks_like_mnemonic(line) {
         return hd::parse(line, passphrase).map(InputKind::Phrase);
@@ -1348,12 +1303,10 @@ struct Parsed {
     rejected: Vec<Rejected>,
 }
 
-/// A line that named no secret, and why. All three parts are kept because the
-/// line is taken out of the input before the scan starts: nothing will ever be
-/// scanned from it, so leaving it there would mean every future run reading and
-/// reporting it again. The number reports it, and the text is what is written
-/// to the rejected file — a line deleted from the input and nowhere else would
-/// be a typo in a phrase silently thrown away.
+/// A line that named no secret, and why. The line leaves the input before the
+/// scan starts, so all three parts are kept: the number reports it, and the
+/// text is written to the rejected file — deleting it from the input and
+/// nowhere else would silently throw away a typo in a phrase.
 struct Rejected {
     number: usize,
     /// The line as it appeared in the input, trimmed.
@@ -1371,25 +1324,23 @@ impl Parsed {
 }
 
 /// Parse every line, skipping blanks and comments, keeping first-seen order and
-/// dropping secrets already seen earlier in the file. Rejections are collected
-/// rather than printed, so the caller can summarize them instead of letting a
-/// messy file bury the results under thousands of warnings.
+/// dropping secrets seen earlier in the file. Rejections are collected rather
+/// than printed, so a messy file cannot bury the results under warnings.
 ///
-/// A line is read as a mnemonic as soon as it holds more than one word. That is
-/// what lets a phrase with a word missing be reported as a bad phrase rather
-/// than as a bad hex key.
+/// A line is read as a mnemonic as soon as it holds more than one word, which
+/// is what lets a phrase with a word missing be reported as a bad phrase rather
+/// than a bad hex key.
 ///
-/// Nothing is derived here. Deriving a phrase's addresses is most of the work
-/// of a run, so it is left to the caller rather than done during the parse.
+/// Nothing is derived here: that is most of the work of a run, and is left to
+/// the caller.
 fn parse_input(text: &str, passphrase: &str, ui: &Ui) -> Result<Parsed, String> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut inputs: Vec<Input> = Vec::new();
     let mut rejected = Vec::new();
     let mut duplicates = 0;
 
-    // Collected first so the rounds below have a total to report against, and
-    // because the lines are read in parallel: this borrows the text rather than
-    // copying it, so the cost is one pointer pair per line.
+    // Collected first so the rounds below have a total to report against. This
+    // borrows the text rather than copying it: one pointer pair per line.
     let lines: Vec<(usize, &str)> = text
         .lines()
         .enumerate()
@@ -1405,11 +1356,9 @@ fn parse_input(text: &str, passphrase: &str, ui: &Ui) -> Result<Parsed, String> 
         |(_, line)| classify(line, passphrase),
         |&(number, line), classified| {
             match classified {
-                // Both kinds dedupe on what identifies the wallet — the seed
-                // for a phrase, the normalized hex for a key — so the same
-                // secret written two ways is read in only once. The line it
-                // repeated on is remembered rather than forgotten: it holds the
-                // same secret, so it leaves the input when that secret is done.
+                // Both kinds dedupe on what identifies the wallet, so a secret
+                // written two ways is read in once. The line it repeated on is
+                // remembered, since it leaves the input when that secret does.
                 Ok(kind) => match seen.get(&kind.id()) {
                     Some(&first) => {
                         inputs[first].repeats.push(number);
@@ -1435,8 +1384,8 @@ fn parse_input(text: &str, passphrase: &str, ui: &Ui) -> Result<Parsed, String> 
         },
     )?;
 
-    // An input holding nothing usable is not an error here: the caller reports
-    // the rejected lines and drains them before deciding what to do about it.
+    // Not an error here: the caller reports and drains the rejected lines
+    // before deciding what to do about an input holding nothing usable.
     Ok(Parsed {
         inputs,
         duplicates,
@@ -1454,15 +1403,12 @@ struct Known {
 
 /// Drop every secret the ledger already holds.
 ///
-/// A secret on file has been answered: it is active, it is recorded, and
-/// deriving it again would spend the run's requests confirming what is already
-/// known. So it leaves the scan here, and the lines that named it leave the
-/// input file — which is what stops the same wordlist slice from being rescanned
-/// on every run from now on.
+/// A secret on file has been answered — it is active and recorded — so scanning
+/// it again would spend requests confirming what is known. It leaves the scan
+/// here, and the lines naming it leave the input.
 ///
-/// Matched on the *raw* line, through the same identity the file dedupes itself
-/// by, so a phrase respaced or a key written `0x…` is still recognized as the
-/// one on file.
+/// Matched on the raw line through the same identity the file dedupes itself
+/// by, so a respaced phrase or a key written `0x…` is still recognized.
 fn drop_known(inputs: &mut Vec<Input>, ledger: &HashSet<String>) -> Known {
     let mut known = Known {
         lines: Vec::new(),
@@ -1483,13 +1429,11 @@ fn drop_known(inputs: &mut Vec<Input>, ledger: &HashSet<String>) -> Known {
     known
 }
 
-/// Derive every address the scan will ask about, keeping the phrases behind
-/// them so one that shows activity can be followed further without re-parsing
-/// or re-stretching its seed.
+/// Derive every address the scan will ask about, keeping the phrases behind them
+/// so one that shows activity can be followed without re-stretching its seed.
 ///
-/// A derivation that fails here ends the run rather than skipping the line: the
-/// only ways it can fail are cryptographic near-impossibilities, and the
-/// expansion pass already treats them the same way.
+/// A failure here ends the run rather than skipping the line: the only ways it
+/// can fail are cryptographic near-impossibilities.
 fn derive_all(
     inputs: Vec<Input>,
     plan: &hd::Plan,
@@ -1513,9 +1457,9 @@ fn derive_all(
         },
     )?;
 
-    // Every input became exactly one entry, in order, so an entry's position is
-    // its input's — which is what lets the phrases be picked out afterwards
-    // rather than moved out during a walk that only borrows them.
+    // Every input became one entry, in order, so an entry's position is its
+    // input's — which lets the phrases be picked out afterwards rather than
+    // moved out during a walk that only borrows them.
     let phrases = inputs
         .into_iter()
         .enumerate()
@@ -1561,8 +1505,7 @@ fn check(
     ui.row(
         "lookup",
         &[
-            // The host the figures came from: the progress line above no longer
-            // names it, and its label has to fit the gutter.
+            // The host the figures came from; the progress line does not name it.
             "blockchain.info".to_string(),
             format!("{} addresses", ui::commas(addresses.len() as u64)),
             format!("{} request{}", requests, plural(requests)),
@@ -1579,9 +1522,8 @@ fn check(
 struct Growing {
     /// Position in `entries`.
     entry: usize,
-    /// The accounts still being followed, in account order. A phrase can be
-    /// growing on several at once, and each is judged on its own hits: an
-    /// account with nothing on it is not carried along by one that has.
+    /// The accounts still being followed, in account order. Each is judged on
+    /// its own hits, so an empty account is not carried along by a busy one.
     accounts: Vec<GrowingAccount>,
     /// How far each round reaches, from `--expand`.
     step: u32,
@@ -1594,9 +1536,8 @@ struct GrowingAccount {
     near: u32,
     far: u32,
     /// Whether that end's most recent window turned anything up. An end that
-    /// came back empty is done, independently of the other one: activity
-    /// clusters at one end of a chain, and expanding the dead end would buy
-    /// nothing but requests.
+    /// came back empty is done, independently of the other: activity clusters
+    /// at one end, and expanding the dead end would only cost requests.
     near_open: bool,
     far_open: bool,
 }
@@ -1647,8 +1588,8 @@ fn index_of(derived: &Derived) -> Option<u32> {
     derived.path.as_deref()?.rsplit('/').next()?.parse().ok()
 }
 
-/// The account a derived address sits under, from its path: the hardened third
-/// step of `m/44'/0'/0'/0/0`.
+/// The account a derived address sits under: the hardened third step of its
+/// path, `m/44'/0'/0'/0/0`.
 fn account_of(derived: &Derived) -> Option<u32> {
     derived
         .path
@@ -1660,27 +1601,139 @@ fn account_of(derived: &Derived) -> Option<u32> {
         .ok()
 }
 
+/// Follow the phrases that showed activity above account 0 into the accounts
+/// past `--accounts`.
+///
+/// The opening pass walks a fixed block of accounts, and that block is a guess.
+/// What is not a guess is where the activity landed: account 0 is the wallet
+/// every seed has and means nothing on its own, but a used account 3 is a seed
+/// someone asked for more than one wallet from, and that is the seed whose
+/// wallets may run past wherever the scan stopped.
+///
+/// So a hit above account 0 buys the next block of the same size, walked at the
+/// same span, and an empty block ends it. Every account in a followed block is
+/// above 0, so from the second round the test is simply whether it found
+/// anything.
+///
+/// This runs before the index expansion, and the accounts it turns up join the
+/// entry they came from, so the index rounds follow them like account 0's.
+///
+/// The lookup is left to the caller so the loop can be exercised offline.
+fn expand_accounts_with(
+    entries: &mut [KeyEntry],
+    phrases: &HashMap<usize, hd::Phrase>,
+    hits: &mut HashMap<String, api::Balance>,
+    span: &hd::Span,
+    block: u32,
+    ui: &Ui,
+    mut look_up: impl FnMut(&[String]) -> Result<(HashMap<String, api::Balance>, usize), String>,
+) -> Result<(), String> {
+    // In entry order, so the same input walks the same phrases in the same
+    // order however the map was laid out.
+    let mut growing: Vec<usize> = phrases
+        .keys()
+        .copied()
+        .filter(|&entry| {
+            entries[entry].addresses.iter().any(|d| {
+                hits.contains_key(&d.address) && account_of(d).is_some_and(|account| account > 0)
+            })
+        })
+        .collect();
+    growing.sort_unstable();
+
+    if growing.is_empty() {
+        return Ok(());
+    }
+
+    let secp = Secp256k1::new();
+    let started = Instant::now();
+    let followed = growing.len();
+    let mut rounds = 0;
+    let mut requests = 0;
+    let mut derived_addresses = 0usize;
+    let mut reached = block;
+
+    // Accounts are hardened children, so the block above the last stops at the
+    // top of the space rather than wrapping into an unreachable one.
+    let mut next = block;
+    while !growing.is_empty() && next < hd::HARDENED {
+        rounds += 1;
+        let end = next.saturating_add(block).min(hd::HARDENED);
+
+        // One plan for the round: every followed phrase is at the same block,
+        // since all started from the same `--accounts` and one that stops is
+        // dropped rather than left behind at an earlier block.
+        let plan = hd::Plan::of((next..end).map(|a| (a, span.clone())).collect());
+
+        let mut round: Vec<(usize, Vec<Derived>)> = Vec::new();
+        let still_growing = growing.len();
+        for (done, &entry) in growing.iter().enumerate() {
+            ui.progress(done, still_growing, "deriving");
+            let raw = entries[entry].raw.clone();
+            let derived = phrases[&entry].derive(&secp, &raw, &plan)?.addresses;
+            round.push((entry, derived));
+        }
+        ui.clear();
+
+        let addresses: Vec<String> = round
+            .iter()
+            .flat_map(|(_, derived)| derived.iter().map(|d| d.address.clone()))
+            .collect();
+        derived_addresses += addresses.len();
+        let (found, batches) = look_up(&addresses)?;
+        requests += batches;
+
+        // A phrase carries into the next block only if this one turned
+        // something up. The round's addresses join the entry they came from, so
+        // the report and the output file see them like any other.
+        for (entry, derived) in round {
+            if !derived.iter().any(|d| found.contains_key(&d.address)) {
+                growing.retain(|&e| e != entry);
+            }
+            entries[entry].addresses.extend(derived);
+        }
+        hits.extend(found);
+
+        reached = end;
+        next = end;
+    }
+
+    ui.row(
+        "accounts",
+        &format!(
+            "{} phrase{} followed to account {}{}",
+            followed,
+            plural(followed),
+            reached - 1,
+            ui.dim(&format!(
+                " · {rounds} round{} · {} addresses · {} request{} · {}",
+                plural(rounds),
+                ui::commas(derived_addresses as u64),
+                requests,
+                plural(requests),
+                ui::elapsed(started.elapsed()),
+            ))
+        ),
+    );
+    Ok(())
+}
+
 /// Follow the phrases that showed activity further down their chains.
 ///
-/// A shallow first pass is cheap and answers the only question that matters for
-/// most phrases: nothing here. The few that do turn something up are the ones
-/// worth paying for, and for those the shallow pass is exactly the wrong answer
-/// — a used wallet's addresses run on past whatever the scan happened to stop
-/// at. So each end that hit is extended `step` indices at a time until a round
-/// comes back empty.
+/// A shallow first pass is cheap and answers the only question most phrases
+/// raise. For the few that turn something up it is the wrong answer, since a
+/// used wallet's addresses run past wherever the scan stopped — so each end
+/// that hit is extended `step` indices at a time until a round comes back empty.
 ///
-/// Rounds are run across all growing phrases at once rather than one phrase at
-/// a time, so each round's addresses batch together into full requests the way
-/// the first pass does.
+/// Rounds run across all growing phrases at once rather than one phrase at a
+/// time, so each round's addresses batch into full requests.
 ///
-/// Every account the opening pass walked is judged on its own hits, and the
-/// same holds for the ends within it: a seed with a busy account 0 and an
-/// untouched account 3 follows the one and leaves the other where it is. The
-/// opening pass is what looks everywhere; expansion is what pays for depth, and
-/// it only pays where there is something to go deeper into.
+/// Every account and every end within it is judged on its own hits: a seed with
+/// a busy account 0 and an untouched account 3 follows the one and leaves the
+/// other. The opening pass looks everywhere; expansion pays for depth, and only
+/// where there is something to go deeper into.
 ///
-/// The lookup is left to the caller so the loop that decides how far to go can
-/// be exercised without a network.
+/// The lookup is left to the caller so the loop can be exercised offline.
 fn expand_with(
     entries: &mut [KeyEntry],
     phrases: &HashMap<usize, hd::Phrase>,
@@ -1690,9 +1743,9 @@ fn expand_with(
     ui: &Ui,
     mut look_up: impl FnMut(&[String]) -> Result<(HashMap<String, api::Balance>, usize), String>,
 ) -> Result<(), String> {
-    // Where a phrase's first-pass hits landed decides which ends are worth
-    // following: a count span covers only the two ends, so an index below the
-    // middle of the space is a near-end hit and anything else is a far-end one.
+    // Where the first-pass hits landed decides which ends are worth following:
+    // a count span covers only the two ends, so an index below the middle of
+    // the space is a near-end hit and anything above it a far-end one.
     let middle = hd::HARDENED / 2;
     let mut followed_accounts = 0;
     let mut growing: Vec<Growing> = phrases
@@ -1707,9 +1760,8 @@ fn expand_with(
                 })
             };
 
-            // Each end follows only if that end is what turned something up — and an
-            // account is no different, so every one the opening pass reached is
-            // judged the same way. Taken from the paths rather than from
+            // An end follows only if that end turned something up, and an
+            // account is no different. Taken from the paths rather than from
             // `--accounts`, so the rounds follow whatever was actually walked.
             let mut reached: Vec<u32> = addresses.iter().filter_map(account_of).collect();
             reached.sort_unstable();
@@ -1751,9 +1803,8 @@ fn expand_with(
     while !growing.is_empty() {
         rounds += 1;
 
-        // Both of a phrase's open ends are derived in one pass, so the hardened
-        // steps at the top of its tree are paid for once per round rather than
-        // once per end.
+        // Both open ends derive in one pass, so the hardened steps at the top
+        // of the tree are paid once per round rather than once per end.
         let mut round: Vec<(usize, Vec<Derived>)> = Vec::new();
         let still_growing = growing.len();
         for (done, phrase) in growing.iter_mut().enumerate() {
@@ -1769,9 +1820,7 @@ fn expand_with(
                     hd::End::Far => state.far = hd::HARDENED - window.start,
                 }
             }
-            // One plan per phrase rather than one per account, so a round pays
-            // the hardened steps at the top of the tree once however many
-            // accounts it is following.
+            // One plan per phrase rather than per account, for the same reason.
             let mut plan: Vec<(u32, hd::Span)> = Vec::new();
             for (account, _, window) in windows {
                 match plan.iter_mut().find(|(a, _)| *a == account) {
@@ -1798,9 +1847,8 @@ fn expand_with(
         let (found, batches) = look_up(&addresses)?;
         requests += batches;
 
-        // An end stays open only if the window just scanned had a hit of its
-        // own; the round's addresses then join the entry they came from, so the
-        // report and the output file see them like any other.
+        // An end stays open only if the window just scanned hit. The round's
+        // addresses then join the entry they came from.
         for (entry, derived) in round {
             let hit_in = |account: u32, end: hd::End| {
                 derived.iter().any(|d| {
@@ -1814,8 +1862,8 @@ fn expand_with(
                     state.near_open &= hit_in(state.account, hd::End::Near);
                     state.far_open &= hit_in(state.account, hd::End::Far);
                 }
-                // An account with both ends closed is done, and dropping it
-                // keeps the next round's plan to the accounts still moving.
+                // An account with both ends closed is done; dropping it keeps
+                // the next round's plan to the accounts still moving.
                 phrase.accounts.retain(|a| a.is_growing(step));
             }
             entries[entry].addresses.extend(derived);
@@ -1826,8 +1874,8 @@ fn expand_with(
     }
 
     let mut parts = vec![format!("{} phrase{}", followed, plural(followed))];
-    // Only when a phrase is being followed on more than one: at `--accounts 1`
-    // every round is account 0's, and saying so under every run says nothing.
+    // Only when a phrase is followed on more than one: at `--accounts 1` every
+    // round is account 0's, and saying so adds nothing.
     if followed_accounts > followed {
         parts.push(format!(
             "{followed_accounts} account{}",
@@ -1846,10 +1894,9 @@ fn expand_with(
 
 /// How many words of a found phrase go on one line.
 ///
-/// A 24-word mnemonic printed whole runs off the right of a normal terminal and
-/// wraps wherever the width happens to fall, breaking mid-word. Six to a line is
-/// how a phrase is written down anyway — two rows for 12 words, four for 24 —
-/// so the split reads as the phrase's own shape rather than as damage.
+/// A 24-word mnemonic printed whole runs off a normal terminal and wraps
+/// mid-word. Six to a line is how a phrase is written down anyway — two rows
+/// for 12 words, four for 24 — so the split reads as its own shape.
 const PHRASE_WORDS_PER_LINE: usize = 6;
 
 /// The lines naming one funded entry: a key is its hex, a phrase is its words
@@ -1876,17 +1923,16 @@ type FundedKey<'a> = (&'a KeyEntry, Vec<FundedAddress<'a>>);
 /// Everything else is a count; a key still holding coins is the one result
 /// worth spelling out, so those get the key, the address and the amount.
 ///
-/// `activity` is the line naming how many addresses were used, which this prints
-/// rather than the caller: when nothing is still funded, "no remaining balance"
-/// is the rest of that sentence rather than a finding of its own, and the two
-/// belong on one line.
+/// `activity` is the line naming how many addresses were used, printed here
+/// rather than by the caller: with nothing still funded, the balance is the
+/// rest of that sentence rather than a finding of its own.
 fn show_funded(
     active: &[&KeyEntry],
     hits: &HashMap<String, api::Balance>,
     activity: &str,
     ui: &Ui,
 ) {
-    // Grouped by key, so a key funded on several address types prints its hex
+    // Grouped by key, so one funded on several address types prints its hex
     // once rather than once per address.
     let funded: Vec<FundedKey> = active
         .iter()
@@ -1949,32 +1995,29 @@ fn show_funded(
 
 /// What a batch's hits amount to: the lines to record, and the keys to send.
 ///
-/// The two are built together because they are the same walk over the same
-/// addresses under the same de-duplication — a key that hit under several
-/// encodings is one secret, written once and sent once. Splitting them into two
-/// passes meant two copies of that rule, free to drift apart.
+/// Built together because they are the same walk under the same de-duplication
+/// — a key that hit under several encodings is one secret, written once and
+/// sent once. Two passes would mean two copies of that rule, free to drift.
 #[derive(Default)]
 struct Findings {
     /// The lines to merge into the output file, in the order they were found.
     records: Vec<outfile::Record>,
     /// 64-char lowercase hex of every secret behind an address that hit, in
-    /// first-seen order — the form the upload API expects, so a `0x` prefix or
-    /// uppercase in the input file cannot reach the wire.
+    /// first-seen order: the form the upload API expects, so a `0x` prefix or
+    /// uppercase in the input cannot reach the wire.
     keys: Vec<String>,
 }
 
 /// Work out what to write and what to send for the secrets that hit.
 ///
-/// A bare key is *recorded* as it was typed, since the output file echoes the
-/// input's spelling, but *sent* as its normalized hex. A mnemonic is recorded as
-/// both the child keys that hit — so the file stays a flat list of spendable
-/// 32-byte keys — and the phrase itself, which is what actually restores the
-/// wallet and what a scan of a wordlist is really looking for. Only the children
-/// are sent: the phrase is not something the API can accept.
+/// A bare key is recorded as typed, since the output file echoes the input's
+/// spelling, but sent as normalized hex. A mnemonic is recorded as both the
+/// child keys that hit — keeping the file a flat list of spendable 32-byte keys
+/// — and the phrase itself, which is what restores the wallet. Only the
+/// children are sent; the API cannot accept a phrase.
 ///
-/// The phrases are emitted after the keys they came from, but the file's own
-/// ordering is what decides where they end up: `outfile` sorts every key ahead
-/// of everything that is not one, so the phrases collect at the bottom.
+/// Phrases are emitted after the keys they came from, but `outfile` sorts every
+/// key ahead of everything that is not one, so they collect at the bottom.
 fn findings(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>) -> Findings {
     let mut found = Findings::default();
     let mut seen = HashSet::new();
@@ -1995,8 +2038,8 @@ fn findings(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>) -> Findi
 
         match entry.is_phrase() {
             // The normalized phrase rather than the raw line: a respaced or
-            // miscased spelling of a phrase already on file is the same wallet,
-            // and the file should not grow a second copy of it.
+            // miscased spelling is the same wallet, and the file should not
+            // grow a second copy of it.
             true => phrases.push(outfile::Record {
                 comments: Vec::new(),
                 line: entry.display.clone(),
@@ -2014,18 +2057,13 @@ fn findings(active: &[&KeyEntry], hits: &HashMap<String, api::Balance>) -> Findi
 
 /// Put the lines that named no secret into the rejected file, and say so.
 ///
-/// Called before the input is drained, not after, because that is the same rule
-/// every other line is held to: nothing leaves the input until it is safely
-/// somewhere else. A bad line is usually a typo in a phrase — a word misspelled,
-/// a word missing — which is exactly the line worth keeping, and deleting it
-/// from the queue and nowhere else would be the one way this tool could lose a
-/// wallet.
+/// Called before the input is drained, under the rule every other line is held
+/// to: nothing leaves the input until it is safely somewhere else. A bad line is
+/// usually a typo in a phrase, which is exactly the line worth keeping.
 ///
-/// Merged into like the ledger, so the file accumulates across runs and reads
-/// the same however many it took to build. Written in the same shape too — the
-/// line alone, nothing above it — because the file is meant to be fixed up and
-/// fed back in, and a run's reasons are already on screen where they can be
-/// read against the line numbers they name.
+/// Merged into like the ledger, so the file accumulates across runs, and written
+/// in the same shape — the line alone — since it is meant to be fixed up and fed
+/// back in. The reasons are already on screen against their line numbers.
 fn write_rejected(args: &Args, rejected: &[Rejected], ui: &Ui) -> Result<(), String> {
     if rejected.is_empty() {
         return Ok(());
@@ -2042,9 +2080,8 @@ fn write_rejected(args: &Args, rejected: &[Rejected], ui: &Ui) -> Result<(), Str
     let merged = outfile::merge(outfile::load(&args.rejected)?, incoming);
     outfile::save(&args.rejected, &merged.records)?;
 
-    // A continuation of the bad lines listed above it rather than a row of its
-    // own: it finishes the sentence they started — here they are, and here is
-    // where they went — and the run already has a row per file it writes.
+    // A continuation of the bad lines above rather than a row of its own: it
+    // finishes the sentence they started.
     ui.cont(&format!(
         "written to {} · {} on file",
         args.rejected.display(),
@@ -2055,15 +2092,12 @@ fn write_rejected(args: &Args, rejected: &[Rejected], ui: &Ui) -> Result<(), Str
 
 /// Read the ledger, tidy it, report it, and hand back what it holds.
 ///
-/// Merging an empty run into the file folds it onto itself and sorts it — the
-/// same pass a run that found something would put it through — so a file edited
-/// by hand between runs, two machines' findings pasted together, comes back
-/// deduped and in order at the start of the next run rather than at the end of
-/// one that happens to find something.
+/// Merging an empty run into the file folds and sorts it, so a file edited by
+/// hand between runs — two machines' findings pasted together — comes back
+/// deduped and in order at the start of the next run.
 ///
-/// The row comes before the input's, because this is the file the input is
-/// about to be judged against: what is already here is what will not be looked
-/// up again.
+/// The row comes before the input's, since this is the file the input is about
+/// to be judged against.
 fn open_ledger(args: &Args, ui: &Ui) -> Result<HashSet<String>, String> {
     let merged = outfile::merge(outfile::load(&args.found)?, Vec::new());
     // --dry-run reports what a real run would do without doing it, and
@@ -2082,11 +2116,8 @@ fn open_ledger(args: &Args, ui: &Ui) -> Result<HashSet<String>, String> {
     Ok(outfile::identities(&merged.records))
 }
 
-/// A row's headline with its bookkeeping trailing behind it, dimmed.
-///
-/// What the run found is what the row is for and stays bright; what the file
-/// did with it afterwards is an aside, and reads as one — so a row scanned at
-/// arm's length gives up its result before its detail.
+/// A row's headline with its bookkeeping trailing behind it, dimmed: what the
+/// run found stays bright, what the file did with it reads as an aside.
 fn with_aside(headline: String, aside: &[String], ui: &Ui) -> String {
     match aside.is_empty() {
         true => headline,
@@ -2120,10 +2151,9 @@ fn write_results(
 
     let found = findings(&active, hits);
 
-    // The ledger first, and the output file after it when that is a different
-    // file: the ledger is what the next run's input is filtered against, so it
-    // is the one that must not miss a batch. An output file that names the same
-    // path is one destination, not two — it has already been written.
+    // The ledger first, then the output file when that is a different path:
+    // the ledger is what the next run's input is filtered against, so it must
+    // not miss a batch. The same path twice is one destination, not two.
     let mut destinations: Vec<&Path> = vec![&args.found];
     if let Some(output) = args.output.as_deref()
         && output != args.found
@@ -2133,22 +2163,20 @@ fn write_results(
 
     let mut written = Vec::new();
     for path in destinations {
-        // Read before writing: the file is merged into, never replaced, so a
-        // second run cannot throw away what the first one found.
+        // Read before writing: merged into, never replaced, so a second run
+        // cannot throw away what the first found.
         let existing = outfile::load(path)?;
         let result = outfile::merge(existing, found.records.clone());
         outfile::save(path, &result.records)?;
         written.push((path, result));
     }
 
-    // What this batch turned up, and what the ledger holds now that it is in:
-    // one row rather than two, because the second was the same sentence
-    // finished — what was found, and where it went.
+    // What this batch turned up and what the ledger holds now that it is in,
+    // as one row: the second would only finish the first's sentence.
     //
     // Always the ledger's figures, never an output file's. It is the file every
-    // run writes and the one that carries from run to run, so its total is the
-    // run's total; an output file is written the same records in the same
-    // merge, and would only say the same thing twice.
+    // run writes, so its total is the run's total; an output file takes the
+    // same records in the same merge and would say the same thing twice.
     let headline = match active.is_empty() {
         true => format!(
             "none of {} {} active",
@@ -2163,10 +2191,9 @@ fn write_results(
         ),
     };
 
-    // What this batch put into the file first, its running total after: the new
-    // ones are this batch's news, and the total is the standing figure they are
-    // news against. "Nothing new" is left to the headline when there was nothing
-    // to be new: a batch with none of its keys active has already said so.
+    // What this batch put into the file, then the running total it is news
+    // against. "Nothing new" is left to the headline when there was nothing to
+    // be new: a batch with no active keys has already said so.
     let mut aside = Vec::new();
     if let Some((_, merged)) = written
         .iter()
@@ -2187,9 +2214,9 @@ fn write_results(
         }
     }
 
-    // Coloured here rather than by `row_good`, which would tint the aside along
-    // with the headline: the good news is the count of active secrets, and the
-    // file's bookkeeping behind it stays the grey every other row's detail is.
+    // Coloured here rather than by `row_good`, which would tint the aside too:
+    // the good news is the count of active secrets, and the bookkeeping behind
+    // it stays the grey every other row's detail is.
     match active.is_empty() {
         true => ui.row("found", &with_aside(headline, &aside, ui)),
         false => {
@@ -2206,8 +2233,7 @@ fn write_results(
 }
 
 #[cfg(test)]
-// A one-window span really is a `Vec` holding one range here; the lint is
-// warning about a mistake these calls are not making.
+// A one-window span really is a `Vec` holding one range here.
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
@@ -2215,10 +2241,9 @@ mod tests {
     const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon \
                           abandon abandon abandon abandon about";
 
-    /// The shipped template is meant to be copied and run as it stands, so a
-    /// bare command line against it has to produce a complete, valid run: an
-    /// input to read, somewhere for the results to go, and every other setting
-    /// still at the value the file says it is.
+    /// The shipped template is copied and run as it stands, so a bare command
+    /// line against it must produce a complete run: an input to read, somewhere
+    /// for the results to go, and every other setting at the value it names.
     #[test]
     fn the_template_is_a_complete_run_on_its_own() {
         let matches = Args::command().get_matches_from(["allkeys-keycheck"]);
@@ -2226,8 +2251,7 @@ mod tests {
         let template = toml::from_str(config::TEMPLATE).unwrap();
         merge_config(&mut args, &matches, template).unwrap();
 
-        // The two the tool cannot run without: no input is an error, and so is
-        // having nowhere to put the results.
+        // The two the tool cannot run without.
         assert_eq!(args.input.as_deref(), Some(Path::new("input.txt")));
         assert_eq!(args.output.as_deref(), Some(Path::new("output.txt")));
         assert_eq!(args.found, Path::new("found.txt"));
@@ -2246,8 +2270,8 @@ mod tests {
         assert_eq!(args.expand, config::Expand::default());
     }
 
-    /// Account 0 alone, at one span: the shape a scan had before `--accounts`,
-    /// and what the index-expansion tests below are written against.
+    /// Account 0 alone, at one span — what the index-expansion tests below are
+    /// written against.
     fn account_zero(span: &hd::Span) -> hd::Plan {
         hd::Plan::of(vec![(0, span.clone())])
     }
@@ -2260,9 +2284,8 @@ mod tests {
         }
     }
 
-    /// Every address a phrase controls in `0..reach`, by the index it sits at.
-    /// The fake chain below is written in terms of indices; this is what turns
-    /// an address back into one.
+    /// Every address a phrase controls in `0..reach`, by index. The fake chains
+    /// below are written in terms of indices; this maps an address back to one.
     fn indices_by_address(phrase: &hd::Phrase, reach: u32) -> HashMap<String, u32> {
         let secp = Secp256k1::new();
         phrase
@@ -2275,9 +2298,9 @@ mod tests {
     }
 
     /// One phrase scanned at a starting count, then expanded against a fake
-    /// chain in which every near-end index below `active_below` has been used
-    /// and nothing at the far end has. Returns the indices that ended up
-    /// derived on one branch, split into the two ends.
+    /// chain where every near-end index below `active_below` is used and
+    /// nothing at the far end is. Returns the indices derived on one branch,
+    /// split by end.
     fn expanded(start: u32, active_below: u32) -> (Vec<u32>, Vec<u32>) {
         expanded_by(start, active_below, hd::EXPANSION_STEP)
     }
@@ -2292,8 +2315,8 @@ mod tests {
             .derive(&secp, PHRASE, &account_zero(&span))
             .expect("derivation of a valid phrase cannot fail");
 
-        // Reaching further than any round should, so that an expansion which
-        // overshoots shows up as an unmarked address rather than as a pass.
+        // Reaching further than any round should, so an expansion that
+        // overshoots shows up rather than passing.
         let used_addresses = indices_by_address(&phrase, active_below);
 
         let mut entries = vec![entry];
@@ -2340,12 +2363,11 @@ mod tests {
     }
 
     /// One phrase scanned at the opening plan for `accounts`, then expanded
-    /// against a fake chain in which every address under `active` — an account
-    /// and how far up its near end the activity runs — has been used.
+    /// against a fake chain where every address under `active` — an account and
+    /// how far up its near end the activity runs — is used.
     ///
-    /// Returns, per account, the near-end indices that ended up derived on one
-    /// branch: the accounts that grew are the ones that reached past the span
-    /// the opening pass gave every one of them.
+    /// Returns the near-end indices derived per account: the ones that grew are
+    /// those reaching past the span the opening pass gave every account.
     fn expanded_accounts(accounts: u32, active: &[(u32, u32)]) -> Vec<(u32, Vec<u32>)> {
         let ui = Ui::new();
         let secp = Secp256k1::new();
@@ -2357,8 +2379,8 @@ mod tests {
             .expect("derivation of a valid phrase cannot fail");
 
         // Reaching further than any round should, so an expansion that
-        // overshoots shows up as an unmarked address rather than as a pass.
-        let used_addresses: HashMap<String, ()> = active
+        // overshoots shows up rather than passing.
+        let used_addresses: HashSet<String> = active
             .iter()
             .flat_map(|&(account, reach)| {
                 phrase
@@ -2370,7 +2392,7 @@ mod tests {
                     .expect("derivation of a valid phrase cannot fail")
                     .addresses
                     .into_iter()
-                    .map(|d| (d.address, ()))
+                    .map(|d| d.address)
             })
             .collect();
 
@@ -2381,7 +2403,7 @@ mod tests {
         let mut hits: HashMap<String, api::Balance> = entries[0]
             .addresses
             .iter()
-            .filter(|d| used_addresses.contains_key(&d.address))
+            .filter(|d| used_addresses.contains(&d.address))
             .map(|d| (d.address.clone(), used()))
             .collect();
 
@@ -2395,7 +2417,7 @@ mod tests {
             |addresses| {
                 let found = addresses
                     .iter()
-                    .filter(|a| used_addresses.contains_key(*a))
+                    .filter(|a| used_addresses.contains(*a))
                     .map(|a| (a.clone(), used()))
                     .collect();
                 Ok((found, 1))
@@ -2428,9 +2450,196 @@ mod tests {
         by_account
     }
 
-    /// The opening pass looks at every account, so an account nobody would
-    /// otherwise have reached is found on its own evidence — and then followed
-    /// on its own evidence too, without dragging the empty ones along.
+    /// One phrase scanned at the opening plan for `accounts`, then followed
+    /// into the blocks above against the same kind of fake chain. Returns the
+    /// accounts that ended up derived, low to high.
+    fn walked_accounts(accounts: u32, active: &[(u32, u32)]) -> Vec<u32> {
+        let ui = Ui::new();
+        let secp = Secp256k1::new();
+        let phrase = hd::parse(PHRASE, "").expect("test vector phrase is valid");
+        let span: hd::Span = "10".parse().expect("a count is a legal span");
+        let entry = phrase
+            .derive(&secp, PHRASE, &hd::Plan::opening(&span, accounts))
+            .expect("derivation of a valid phrase cannot fail");
+
+        let used_addresses: HashSet<String> = active
+            .iter()
+            .flat_map(|&(account, reach)| {
+                phrase
+                    .derive(
+                        &secp,
+                        PHRASE,
+                        &hd::Plan::of(vec![(account, hd::Span::of(vec![0..reach]))]),
+                    )
+                    .expect("derivation of a valid phrase cannot fail")
+                    .addresses
+                    .into_iter()
+                    .map(|d| d.address)
+            })
+            .collect();
+
+        let mut entries = vec![entry];
+        let mut phrases = HashMap::new();
+        phrases.insert(0, phrase);
+
+        let mut hits: HashMap<String, api::Balance> = entries[0]
+            .addresses
+            .iter()
+            .filter(|d| used_addresses.contains(&d.address))
+            .map(|d| (d.address.clone(), used()))
+            .collect();
+
+        expand_accounts_with(
+            &mut entries,
+            &phrases,
+            &mut hits,
+            &span,
+            accounts,
+            &ui,
+            |addresses| {
+                let found = addresses
+                    .iter()
+                    .filter(|a| used_addresses.contains(*a))
+                    .map(|a| (a.clone(), used()))
+                    .collect();
+                Ok((found, 1))
+            },
+        )
+        .expect("expansion of a valid phrase cannot fail");
+
+        let mut walked: Vec<u32> = entries[0].addresses.iter().filter_map(account_of).collect();
+        walked.sort_unstable();
+        walked.dedup();
+        walked
+    }
+
+    /// Account 0 is the wallet every seed has, so activity on it says nothing
+    /// about whether a second was made.
+    #[test]
+    fn account_zero_alone_buys_no_further_accounts() {
+        assert_eq!(walked_accounts(5, &[(0, 5)]), (0..5).collect::<Vec<u32>>());
+    }
+
+    /// A used account above 0 is a seed asked for more than one wallet, which
+    /// is what buys the block above.
+    #[test]
+    fn a_used_account_above_zero_buys_the_next_block() {
+        // Account 3 is used and nothing above 4 is, so the second block is
+        // walked, comes back empty, and ends it.
+        assert_eq!(walked_accounts(5, &[(3, 5)]), (0..10).collect::<Vec<u32>>());
+    }
+
+    /// Each block is bought by the one below, so a seed used far up the account
+    /// space is followed the whole way rather than one block in.
+    #[test]
+    fn blocks_continue_while_they_keep_finding_something() {
+        // Something in every block up to 20..25 — each one buys the next — and
+        // then an empty 25..30 stops it.
+        assert_eq!(
+            walked_accounts(5, &[(3, 3), (7, 3), (12, 3), (16, 3), (21, 3)]),
+            (0..30).collect::<Vec<u32>>()
+        );
+    }
+
+    /// A gap ends the walk despite activity above it: the scan follows evidence
+    /// one block at a time and cannot see past an empty block.
+    #[test]
+    fn an_empty_block_stops_the_walk() {
+        // Nothing in 5..10, so 10..15 is never reached and account 12 is missed.
+        assert_eq!(
+            walked_accounts(5, &[(2, 3), (12, 3)]),
+            (0..10).collect::<Vec<u32>>()
+        );
+    }
+
+    /// Nothing found at all means nothing to follow, and no addresses derived.
+    #[test]
+    fn a_phrase_with_no_hits_is_not_followed() {
+        assert_eq!(walked_accounts(5, &[]), (0..5).collect::<Vec<u32>>());
+    }
+
+    /// The accounts a block turns up join the entry, which is where the index
+    /// expansion reads its accounts from, so a wallet found in the second block
+    /// is followed down its chain like account 0's.
+    #[test]
+    fn accounts_found_in_a_later_block_are_followed_on_their_indices() {
+        let ui = Ui::new();
+        let secp = Secp256k1::new();
+        let phrase = hd::parse(PHRASE, "").expect("test vector phrase is valid");
+        let span: hd::Span = "10".parse().expect("a count is a legal span");
+        let entry = phrase
+            .derive(&secp, PHRASE, &hd::Plan::opening(&span, 5))
+            .expect("derivation of a valid phrase cannot fail");
+
+        // Account 3 buys the block above; account 7 in that block runs deep
+        // enough that only an index expansion reaches the end of it.
+        let used_addresses: HashSet<String> = [(3u32, 3u32), (7, 250)]
+            .iter()
+            .flat_map(|&(account, reach)| {
+                phrase
+                    .derive(
+                        &secp,
+                        PHRASE,
+                        &hd::Plan::of(vec![(account, hd::Span::of(vec![0..reach]))]),
+                    )
+                    .expect("derivation of a valid phrase cannot fail")
+                    .addresses
+                    .into_iter()
+                    .map(|d| d.address)
+            })
+            .collect();
+
+        let mut entries = vec![entry];
+        let mut phrases = HashMap::new();
+        phrases.insert(0, phrase);
+        let mut hits: HashMap<String, api::Balance> = entries[0]
+            .addresses
+            .iter()
+            .filter(|d| used_addresses.contains(&d.address))
+            .map(|d| (d.address.clone(), used()))
+            .collect();
+
+        let look_up = |addresses: &[String]| {
+            let found: HashMap<String, api::Balance> = addresses
+                .iter()
+                .filter(|a| used_addresses.contains(*a))
+                .map(|a| (a.clone(), used()))
+                .collect();
+            Ok((found, 1))
+        };
+
+        expand_accounts_with(&mut entries, &phrases, &mut hits, &span, 5, &ui, look_up)
+            .expect("expansion of a valid phrase cannot fail");
+        expand_with(
+            &mut entries,
+            &phrases,
+            &mut hits,
+            10,
+            hd::EXPANSION_STEP,
+            &ui,
+            look_up,
+        )
+        .expect("expansion of a valid phrase cannot fail");
+
+        let mut indices: Vec<u32> = entries[0]
+            .addresses
+            .iter()
+            .filter(|d| d.kind == keys::AddressKind::P2wpkh)
+            .filter(|d| d.path.as_deref().unwrap().starts_with("m/44'/0'/7'/0/"))
+            .filter_map(index_of)
+            .filter(|&i| i < hd::HARDENED / 2)
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+
+        // Out to 300 in rounds of a hundred, then an empty 300..400 ends it —
+        // what account 0 would have got had the hit landed there.
+        assert_eq!(indices, (0..400).collect::<Vec<u32>>());
+    }
+
+    /// The opening pass looks at every account, so one nobody would otherwise
+    /// reach is found on its own evidence and then followed on it, without
+    /// dragging the empty accounts along.
     #[test]
     fn only_the_account_that_hit_is_followed() {
         // Account 0 is empty and account 2 is used through index 250.
@@ -2444,15 +2653,15 @@ mod tests {
         // hundred, then an empty 300..400 ends it.
         assert_eq!(grown[2].1, (0..400).collect::<Vec<u32>>());
 
-        // The three with nothing on them stay exactly where the opening pass
-        // left them, which is the whole cost of an account that was never used.
+        // The three with nothing on them stay where the opening pass left them,
+        // which is the whole cost of an unused account.
         for i in [0, 1, 3] {
             assert_eq!(grown[i].1, (0..10).collect::<Vec<u32>>(), "account {i}");
         }
     }
 
-    /// A hit on one account says nothing about the others, so it does not buy
-    /// them any depth: expansion is paid for per account, like per end.
+    /// A hit on one account says nothing about the others, so it buys them no
+    /// depth: expansion is paid per account, as it is per end.
     #[test]
     fn a_hit_on_one_account_does_not_follow_the_rest() {
         let grown = expanded_accounts(4, &[(0, 5)]);
@@ -2471,8 +2680,8 @@ mod tests {
         }
     }
 
-    /// A phrase entry with one hit address, built by hand: `records` cares only
-    /// about the source, the display form and which addresses are in `hits`.
+    /// A phrase entry with one hit address, built by hand: only the source, the
+    /// display form and which addresses are in `hits` matter here.
     fn phrase_entry(display: &str, secret: &str, address: &str) -> KeyEntry {
         KeyEntry {
             raw: format!("  {display}  "),
@@ -2503,12 +2712,12 @@ mod tests {
         assert_eq!(lines, [key.as_str(), other.as_str(), PHRASE, "zoo zoo zoo"]);
 
         // The same walk decides what is uploaded: a phrase is represented by
-        // its hit children, never by the phrase, which the API cannot take.
+        // its hit children, which is all the API can take.
         assert_eq!(found.keys, [key.as_str(), other.as_str()]);
 
-        // And through the file's own ordering, which is what actually decides:
-        // both keys first ascending, then the phrases by length — the short
-        // one ahead of the 12-word one despite sorting after it alphabetically.
+        // And through the file's own ordering, which is what decides: keys
+        // first ascending, then phrases by length — the short one ahead of the
+        // 12-word one despite sorting after it alphabetically.
         let merged = outfile::merge(Vec::new(), found.records);
         assert_eq!(
             outfile::render(&merged.records),
@@ -2518,9 +2727,9 @@ mod tests {
 
     #[test]
     fn expansion_follows_an_end_that_keeps_hitting() {
-        // Used through index 599, so the rounds run 10..100 up to 500..600 —
-        // each with a hit of its own — and then 600..700 comes back empty and
-        // ends it. The dead far end is left where it started.
+        // Used through index 599, so the rounds run 10..100 up to 500..600,
+        // each with a hit, and then an empty 600..700 ends it. The dead far end
+        // is left where it started.
         let (near, far) = expanded(10, 600);
         assert_eq!(near, (0..700).collect::<Vec<u32>>());
         assert_eq!(far.len(), 10);
@@ -2542,8 +2751,7 @@ mod tests {
     }
 
     /// `--expand` decides how far each round reaches, and so how far past the
-    /// activity a scan goes before it stops. The same chain scanned in smaller
-    /// rounds stops sooner; in one large round it overshoots further.
+    /// activity a scan goes before stopping.
     #[test]
     fn the_expand_step_sets_how_far_each_round_goes() {
         // Used through index 99. In rounds of 50 that is 10..50 and 50..100,
@@ -2552,27 +2760,25 @@ mod tests {
         assert_eq!(near, (0..150).collect::<Vec<u32>>());
         assert_eq!(far.len(), 10);
 
-        // The same activity in rounds of 200 clears it in one, and stops after
-        // the empty round that follows — twice as far for half the requests.
+        // The same activity in rounds of 200 clears it in one and stops after
+        // the empty round that follows: twice as far for half the requests.
         let (near, _) = expanded_by(10, 100, 200);
         assert_eq!(near, (0..400).collect::<Vec<u32>>());
     }
 
     /// `--expand false` takes a count as exactly the indices it names, so a
-    /// phrase that hits costs no more than one that does not — which is the
-    /// point of a fixed-cost pass over a wordlist.
+    /// phrase that hits costs no more than one that does not.
     #[test]
     fn expand_off_leaves_a_count_where_it_started() {
         for off in ["false", "off", "no"] {
             let args = Args::try_parse_from(["allkeys-keycheck", "--expand", off]).unwrap();
-            // The count is still a count; it is expansion that is gone, which
-            // is the pair the run itself asks for before it follows anything.
+            // The count is still a count; it is expansion that is gone.
             assert!(args.indices.count().is_some());
             assert_eq!(args.expand.step(), None);
         }
     }
 
-    /// The same flag still carries the round size, and `true` names the default
+    /// The same flag carries the round size, and `true` names the default
     /// rather than being refused as "not a number".
     #[test]
     fn expand_takes_a_size_or_a_yes() {
@@ -2595,8 +2801,7 @@ mod tests {
         Ok(args)
     }
 
-    /// A batch of no phrases would never get through the input. Refused from
-    /// either direction, like a step of zero.
+    /// A batch of no phrases would never get through the input.
     #[test]
     fn a_phrase_batch_of_zero_is_refused() {
         assert!(Args::try_parse_from(["allkeys-keycheck", "--phrase-batch", "0"]).is_err());
@@ -2604,9 +2809,9 @@ mod tests {
     }
 
     /// A request carrying no addresses asks the API about nothing, and a scan
-    /// made of them would never finish. Refused from either direction, like the
-    /// other two sizes — this one used to be silently rescued to a batch of one,
-    /// turning a 40,000-address pass into 40,000 requests.
+    /// made of them would never finish. Refused from either direction rather
+    /// than rescued to a batch of one, which would turn a 40,000-address pass
+    /// into 40,000 requests.
     #[test]
     fn an_api_batch_of_zero_is_refused() {
         assert!(Args::try_parse_from(["allkeys-keycheck", "--api-batch", "0"]).is_err());
@@ -2614,9 +2819,8 @@ mod tests {
     }
 
     /// Past 1,500 the API stops answering rather than complaining: the body
-    /// exceeds 64 KiB and comes back `200 {}`, which is the same shape as a
-    /// batch where nothing was ever used. Refused at the boundary so nobody
-    /// raises it looking for speed and gets a scan that finds less.
+    /// exceeds 64 KiB and comes back `200 {}`, the same shape as a batch where
+    /// nothing was used. Refused so nobody raises it and finds less.
     #[test]
     fn an_api_batch_over_the_body_limit_is_refused() {
         let over = (api::MAX_API_BATCH + 1).to_string();
@@ -2631,11 +2835,9 @@ mod tests {
         assert_eq!(args.api_batch, api::MAX_API_BATCH);
     }
 
-    /// `--delay` is how a scan was slowed down before concurrency existed, and
-    /// it is applied per connection. Eight of them each honouring it would be
-    /// eight times the request rate the same setting used to give, so a delay
-    /// on its own still means one request at a time — otherwise upgrading would
-    /// silently undo the one control for going easy on the endpoint.
+    /// `--delay` predates concurrency and is applied per connection, so eight
+    /// workers honouring it would be eight times the request rate it used to
+    /// give. A delay on its own still means one request at a time.
     #[test]
     fn a_delay_on_its_own_still_means_one_request_at_a_time() {
         let args = merged(&["allkeys-keycheck", "--delay", "500"], "").unwrap();
@@ -2643,7 +2845,7 @@ mod tests {
         let args = merged(&["allkeys-keycheck"], "delay = 500\n").unwrap();
         assert_eq!(args.concurrency, 1);
 
-        // Asking for both is someone who knows what each one does.
+        // Asking for both is someone who knows what each does.
         let args = merged(
             &["allkeys-keycheck", "--delay", "500", "--concurrency", "4"],
             "",
@@ -2663,9 +2865,8 @@ mod tests {
         assert_eq!(args.concurrency, api::DEFAULT_CONCURRENCY);
     }
 
-    /// Concurrency is bounded at both ends: no requests at all would never
-    /// finish, and a scan opening far more than was ever measured against a free
-    /// endpoint is asking to be blocked.
+    /// Concurrency is bounded at both ends: no requests would never finish, and
+    /// far more than was ever measured against a free endpoint invites a block.
     #[test]
     fn concurrency_outside_its_range_is_refused() {
         let over = (api::MAX_CONCURRENCY + 1).to_string();
@@ -2674,7 +2875,7 @@ mod tests {
         assert!(merged(&["allkeys-keycheck"], "concurrency = 0\n").is_err());
         assert!(merged(&["allkeys-keycheck"], &format!("concurrency = {over}\n")).is_err());
 
-        // A flag still wins over a file that sets it, like every other option.
+        // A flag still wins over a file that sets it.
         let args = merged(
             &["allkeys-keycheck", "--concurrency", "2"],
             "concurrency = 5\n",
@@ -2685,10 +2886,8 @@ mod tests {
         assert_eq!(args.concurrency, 5);
     }
 
-    /// A dry run contacts no network and so never uploads. It must not be held
-    /// up by a token it will never spend — `upload = true` is an ordinary thing
-    /// to leave in a config file, and a dry run is what you reach for before a
-    /// real one.
+    /// A dry run contacts no network and never uploads, so it is not held up by
+    /// a token it will never spend.
     #[test]
     fn a_dry_run_needs_no_upload_token() {
         let args = merged(&["allkeys-keycheck", "--dry-run"], "upload = true\n").unwrap();
@@ -2709,7 +2908,7 @@ mod tests {
     }
 
     /// The two batch sizes are different things — addresses per request and
-    /// phrases per pass — so neither may quietly stand in for the other.
+    /// phrases per pass — so neither stands in for the other.
     #[test]
     fn the_two_batch_sizes_are_separate() {
         let matches = Args::command().get_matches_from([
@@ -2724,9 +2923,8 @@ mod tests {
         assert_eq!(args.phrase_batch, 5);
     }
 
-    /// A step of zero would ask for rounds of no indices, which would either
-    /// spin forever or quietly scan nothing. It is not read as "do not expand"
-    /// either — that is what `false` is for. Refused from either direction.
+    /// A step of zero asks for rounds of no indices, which would spin forever
+    /// or scan nothing. It is not read as "do not expand" either; `false` is.
     #[test]
     fn a_step_of_zero_is_refused() {
         assert!(Args::try_parse_from(["allkeys-keycheck", "--expand", "0"]).is_err());
@@ -2743,19 +2941,15 @@ mod tests {
         let sized = merged(&["allkeys-keycheck"], "expand = 50\n").unwrap();
         assert_eq!(sized.expand.step(), Some(50));
 
-        // And a flag still beats the file, which is the whole point of the
-        // layering: `expand = false` left in a file months ago must not quietly
-        // swallow an `--expand` typed today.
+        // And a flag still beats the file: an `expand = false` left in a config
+        // months ago must not swallow an `--expand` typed today.
         let flagged = merged(&["allkeys-keycheck", "--expand", "25"], "expand = false\n").unwrap();
         assert_eq!(flagged.expand.step(), Some(25));
     }
 
-    /// A repeat holds no secret of its own — the line it repeats is still in the
-    /// file — so it is taken out before the scan starts rather than carried
-    /// until the batch that scans that secret is safely written. What must not
-    /// happen is the reverse: the first line to name a secret staying put until
-    /// its batch is done, so that an interrupted run keeps every secret it
-    /// started with.
+    /// A repeat holds no secret of its own, so it is taken out before the scan
+    /// starts. The line it repeats is not: that stays until its batch is safely
+    /// written, so an interrupted run keeps every secret it started with.
     #[test]
     fn a_repeat_is_listed_apart_from_the_line_it_repeats() {
         let raw = format!(
@@ -2764,16 +2958,16 @@ mod tests {
         );
         let parsed = parse_input(&raw, "", &Ui::new()).expect("the lines parse");
 
-        // Three spellings of one key, so one input standing on line 1 with the
-        // other two recorded as repeats — and the phrase untouched beside it.
+        // Three spellings of one key: one input on line 1 with the other two
+        // recorded as repeats, and the phrase untouched beside it.
         assert_eq!(parsed.duplicates, 2);
         assert_eq!(parsed.inputs.len(), 2);
         let key = &parsed.inputs[0];
         assert_eq!(key.number, 1);
         assert_eq!(key.repeats, vec![3, 4]);
 
-        // The repeats are what leaves up front; the line that named the secret
-        // is not among them, and is all that `lines()` yields once they have.
+        // The repeats leave up front; the line that named the secret does not,
+        // and is all `lines()` yields once they have.
         let mut input = parse_input(&raw, "", &Ui::new()).expect("the lines parse");
         let spent: Vec<usize> = input
             .inputs
@@ -2790,8 +2984,7 @@ mod tests {
         assert_eq!(scanned, vec![1, 2]);
     }
 
-    /// An input edited by anything else mid-run is left alone from then on,
-    /// rather than being rewritten over the top of someone else's change.
+    /// An input edited by anything else mid-run is left alone from then on.
     #[test]
     fn an_input_edited_during_the_run_stops_being_drained() {
         let key = "0".repeat(64);
@@ -2804,8 +2997,8 @@ mod tests {
             .expect("its own write is fine");
         assert!(queue.draining());
 
-        // Somebody else appends a line. The next drain notices, warns, and
-        // leaves the file exactly as they left it.
+        // Something else appends a line. The next drain notices, warns, and
+        // leaves the file exactly as it found it.
         let edited = format!("{}\n{}\n", queue.render(), "1".repeat(64));
         std::fs::write(&path, &edited).unwrap();
         queue
@@ -2823,8 +3016,8 @@ mod tests {
     fn what_the_ledger_already_holds_leaves_the_input() {
         let key = "0".repeat(64);
         // The phrase is spelled differently in each of the three places it
-        // appears — in the ledger, in the input, and in the input's repeat of
-        // it — because that is the case a plain line match would miss.
+        // appears — the ledger, the input, and the input's repeat of it —
+        // because that is the case a plain line match would miss.
         let ledger = outfile::identities(&outfile::parse(&format!(
             "{}\n{PHRASE}\n",
             key.to_uppercase()
@@ -2836,8 +3029,7 @@ mod tests {
             "1".repeat(64)
         );
         let mut inputs = parse_input(&text, "", &Ui::new()).unwrap().inputs;
-        // The two spellings of the phrase were already one input, holding line
-        // 3 as a repeat of line 2.
+        // The two spellings were already one input, line 3 repeating line 2.
         assert_eq!(inputs.len(), 3);
 
         let known = drop_known(&mut inputs, &ledger);
@@ -2846,8 +3038,7 @@ mod tests {
         assert_eq!(kinds(&inputs), "k", "only the key that was not on file");
     }
 
-    /// The common case, and the one that must cost nothing: an empty ledger
-    /// leaves every input exactly where it was.
+    /// The common case: an empty ledger leaves every input where it was.
     #[test]
     fn an_empty_ledger_takes_nothing() {
         let mut inputs: Vec<Input> = "kpk".chars().map(line).collect();
@@ -2855,8 +3046,7 @@ mod tests {
         assert_eq!((known.secrets, inputs.len()), (0, 3));
     }
 
-    /// A line of the given kind — 'p' for a phrase, anything else a key —
-    /// which is all `in_batches` looks at.
+    /// A line of the given kind: 'p' for a phrase, anything else a key.
     fn line(kind: char) -> Input {
         let raw = match kind {
             'p' => PHRASE.to_string(),
@@ -2880,7 +3070,7 @@ mod tests {
             .collect()
     }
 
-    /// Every key goes in the first batch, wherever the file had them, and the
+    /// Every key goes in the first batch, wherever the file had it, and the
     /// phrases follow `per_batch` at a time.
     #[test]
     fn keys_come_first_then_phrases_in_batches() {
@@ -2891,8 +3081,8 @@ mod tests {
         assert_eq!(shapes, ["kkkk", "pp", "pp"]);
     }
 
-    /// A file of nothing but keys is one batch however long it is: five
-    /// addresses each is not what makes a run large.
+    /// A file of only keys is one batch however long: five addresses each is
+    /// not what makes a run large.
     #[test]
     fn keys_alone_are_never_split() {
         let input: Vec<Input> = (0..10).map(|_| line('k')).collect();
@@ -2901,8 +3091,7 @@ mod tests {
         assert_eq!(batches[0].len(), 10);
     }
 
-    /// A file with no keys starts straight in on the phrases, rather than
-    /// leading with an empty batch.
+    /// A file with no keys starts on the phrases rather than an empty batch.
     #[test]
     fn phrases_alone_need_no_key_batch() {
         let input: Vec<Input> = (0..5).map(|_| line('p')).collect();
@@ -2931,10 +3120,9 @@ mod tests {
         }
     }
 
-    /// The settings that were dropped are refused by name rather than ignored.
-    /// A file carried over from an older version is the likely way to meet
-    /// them, and a `no-expand = true` that silently did nothing would turn a
-    /// fixed-cost pass into an expanding one without saying so.
+    /// Dropped settings are refused by name rather than ignored: a file carried
+    /// over from an older version is how they turn up, and a `no-expand = true`
+    /// that did nothing would turn a fixed-cost pass into an expanding one.
     #[test]
     fn the_settings_that_were_dropped_are_refused_by_name() {
         for gone in ["no-expand = true\n", "no-color = true\n"] {
@@ -2948,9 +3136,8 @@ mod tests {
         assert!(Args::try_parse_from(["allkeys-keycheck", "--no-color"]).is_err());
     }
 
-    /// A funded phrase is printed six words to a line — four lines for 24
-    /// words, two for 12 — so it stays inside the terminal instead of wrapping
-    /// wherever the width lands. A key is one line however long its hex is.
+    /// A funded phrase prints six words to a line — four lines for 24 words,
+    /// two for 12 — so it stays inside the terminal. A key is always one line.
     #[test]
     fn a_funded_phrase_prints_six_words_to_a_line() {
         let entry = |display: &str, source| KeyEntry {

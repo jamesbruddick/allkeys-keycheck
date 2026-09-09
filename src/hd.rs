@@ -1,21 +1,17 @@
 //! BIP39 mnemonics and the BIP32 addresses they control.
 //!
-//! A phrase is not one key but a tree of them, so a scan has to choose where to
-//! look. The choice made here is the four standard account layouts — BIP44,
-//! BIP49, BIP84 and BIP86 — on both the receive and the change chain, and
-//! within each chain whichever indices its `Span` asks for. Every key
-//! that turns up is then treated exactly like a bare one: all five encodings,
-//! not only the one its derivation path implies.
+//! A phrase is a tree of keys, so a scan has to choose where to look: the four
+//! standard account layouts (BIP44, BIP49, BIP84, BIP86), both the receive and
+//! change chain, and within each chain whichever indices its `Span` names.
+//! Every key found is then treated like a bare one — all five encodings, not
+//! only the one its derivation path implies.
 //!
-//! The far end of each chain matters because the index space runs to 2^31-1 and
-//! a phrase whose funds sit up there looks completely unused to a scan that only
-//! walks forward from zero.
+//! Both ends of each chain matter: the index space runs to 2^31-1, and a phrase
+//! whose funds sit up there is invisible to a scan that only walks up from zero.
 //!
-//! Accounts are the other axis, and they are walked the same way: every account
-//! the scan reaches gets the same span, because nothing about account 0 says
-//! whether a second wallet was ever made from the same seed. What the accounts
-//! share is the *following*, not the first pass — activity anywhere in a phrase
-//! makes it a live seed, and a live seed is expanded on every account at once.
+//! Accounts are the other axis, walked the same way. Nothing about account 0
+//! says whether a second wallet was ever made from the same seed, so the
+//! opening pass gives every account the same span.
 
 use bip39::{Language, Mnemonic};
 use bitcoin::Network;
@@ -36,32 +32,28 @@ pub const WORD_COUNTS: [usize; 5] = [12, 15, 18, 21, 24];
 /// it is hardened and cannot be reached from a public key.
 pub const HARDENED: u32 = 0x8000_0000;
 
-/// The account layouts scanned, by BIP44 purpose. The purpose says which
-/// encoding a wallet *intended* — 84' means it was handing out P2WPKH — but
-/// what it fixes is the branch of the tree, and therefore the keys. The
-/// addresses each of those keys can control is a separate question, answered
-/// by `keys::BARE_KEY_KINDS` below.
+/// The account layouts scanned, by BIP44 purpose. A purpose says which encoding
+/// a wallet intended, but what it fixes is the branch of the tree and therefore
+/// the keys; which addresses those keys control is `keys::BARE_KEY_KINDS`.
 const PURPOSES: [u32; 4] = [44, 49, 84, 86];
 
 /// Receive chain and change chain. Wallets hand out change addresses without
-/// ever showing them, so a phrase can easily have history on `/1` and none
-/// at all on `/0`.
+/// showing them, so a phrase can have history on `/1` and none on `/0`.
 const CHAINS: [u32; 2] = [0, 1];
 
 /// Which indices of each chain to scan: any number of windows into the index
 /// space, held sorted and non-overlapping.
 ///
-/// A list of windows rather than a single depth because the ends of a chain
-/// answer different questions. A wallet in ordinary use keeps its addresses at the low end; the
-/// far end is where a phrase parked at index 2^31-1 hides; and a window in the
-/// middle is one shard of a scan too large to run in a single pass. Nothing
-/// about the tree privileges any of the three, so the span does not either.
+/// A list of windows rather than a single depth, because the ends answer
+/// different questions: a wallet in ordinary use keeps its addresses at the low
+/// end, a phrase parked at 2^31-1 hides at the far end, and a window in the
+/// middle is one shard of a scan too large for a single pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     windows: Vec<Range<u32>>,
-    /// The count it was written as, when it was written as one. Only a count
-    /// span grows: it says "this far in from each end", which is a starting
-    /// point, where a window list names exactly the indices that were asked for.
+    /// The count it was written as, if it was written as one. Only a count
+    /// span grows: it names a distance in from each end, where a window list
+    /// names exactly the indices asked for.
     count: Option<u32>,
 }
 
@@ -79,15 +71,14 @@ impl Span {
         &self.windows
     }
 
-    /// How far in from each end this span reaches, if it was written as a
-    /// count — the frontier an expanding scan starts from.
+    /// How far in from each end this span reaches when written as a count —
+    /// the frontier an expanding scan starts from.
     pub fn count(&self) -> Option<u32> {
         self.count
     }
 
-    /// Sort and fuse, so that overlapping or touching windows are one window.
-    /// Without this an index named twice would be derived twice and, worse,
-    /// queried twice — paying for a request that answers nothing.
+    /// Sort and fuse, so overlapping or touching windows become one. Without
+    /// this an index named twice would be derived and queried twice.
     fn merged(mut windows: Vec<Range<u32>>) -> Vec<Range<u32>> {
         windows.sort_by_key(|w| w.start);
         let mut merged: Vec<Range<u32>> = Vec::with_capacity(windows.len());
@@ -111,16 +102,13 @@ impl Span {
 
 /// Which accounts to walk, and how deep each one goes.
 ///
-/// A seed is not one wallet but one per account number, and nothing about
-/// account 0 says whether the others were ever used. So the opening pass asks
-/// every account the same question it asks account 0 — the whole `--indices`
-/// span — and the answer for one account carries the others with it: a phrase
-/// that turns anything up anywhere is a live seed, and a live seed is followed
-/// out on every account it has.
+/// A seed holds one wallet per account number, and nothing about account 0 says
+/// whether the others were ever used, so the opening pass asks every account
+/// the same question: the whole `--indices` span.
 ///
-/// The plan is what carries that shape into the walk. Each account is paired
-/// with the span walked under it, which the opening pass keeps uniform and an
-/// expansion round does not — by then the accounts have moved apart.
+/// Each account is paired with the span walked under it. The opening pass keeps
+/// those uniform; an expansion round does not, since by then the accounts have
+/// moved apart.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     accounts: Vec<(u32, Span)>,
@@ -134,8 +122,8 @@ impl Plan {
         }
     }
 
-    /// A plan naming its accounts and spans directly — what an expansion round
-    /// asks for, where each account is at its own depth.
+    /// A plan naming accounts and spans directly — what an expansion round
+    /// asks for, each account at its own depth.
     pub fn of(accounts: Vec<(u32, Span)>) -> Self {
         Self { accounts }
     }
@@ -170,10 +158,9 @@ impl Plan {
 /// `100` as shorthand for the first and last hundred, or a comma-separated list
 /// of absolute half-open windows: `10..110`, `400000..500000,2147483548..`.
 ///
-/// Ends are absolute index numbers rather than offsets from the top, which
-/// keeps every window readable on its own and keeps the value free of the
-/// leading `-` that a shell would take for a flag. An omitted start means 0 and
-/// an omitted end means the end of the index space.
+/// Ends are absolute index numbers rather than offsets from the top, keeping
+/// each window readable on its own and free of the leading `-` a shell would
+/// take for a flag. An omitted start means 0, an omitted end the top.
 impl FromStr for Span {
     type Err = String;
 
@@ -183,9 +170,8 @@ impl FromStr for Span {
             return Err("--indices needs a value: a count, or a window like 10..110".into());
         }
 
-        // A bare count is the common case and means both ends. Only when it is
-        // the whole value: `0..100,50` would otherwise be two different
-        // languages in one list.
+        // A bare count means both ends, and only as the whole value:
+        // `0..100,50` would otherwise mix two grammars in one list.
         if !spec.contains("..") && !spec.contains(',') {
             let depth = index(spec, "--indices")?;
             if depth == 0 {
@@ -216,23 +202,20 @@ pub enum End {
 }
 
 /// How far each round of an expanding scan reaches by default: out to the next
-/// multiple of this. A scan that started at 10 therefore grows to 100 and then
-/// to 200, rather than to 110 and 210 — round numbers are what someone reading
-/// the output has to reason about. `--expand` overrides it.
+/// multiple of this, so a scan started at 10 grows to 100 and then 200 rather
+/// than 110 and 210. `--expand` overrides it.
 pub const EXPANSION_STEP: u32 = 100;
 
-/// The next window out from one end, given how far both ends have already been
-/// scanned. `None` once that end has nowhere left to go — either the space is
-/// exhausted or the other end has already covered what is left.
+/// The next window out from one end, given how far both ends have been scanned.
+/// `None` once that end has nowhere left to go, whether the space is exhausted
+/// or the other end has covered what is left.
 ///
-/// `scanned` and `opposite` are counts inwards from their own ends, so the two
-/// meet when they sum to the size of the index space. `step` is how far a round
-/// reaches, and must be at least 1: a round of nothing would never terminate.
+/// `scanned` and `opposite` count inwards from their own ends, so the two meet
+/// when they sum to the size of the index space. `step` must be at least 1.
 pub fn next_window(end: End, scanned: u32, opposite: u32, step: u32) -> Option<Range<u32>> {
     debug_assert!(step > 0, "a step of zero would scan nothing, forever");
 
-    // The far side of the round, clamped so the two ends cannot cross and
-    // derive the same index twice.
+    // Clamped so the two ends cannot cross and derive the same index twice.
     let target = (scanned / step + 1)
         .saturating_mul(step)
         .min(HARDENED.saturating_sub(opposite));
@@ -263,8 +246,7 @@ fn window(part: &str) -> Result<Range<u32>, String> {
         index(end, "the end of")?
     };
 
-    // Half-open, like the Rust ranges it becomes: 0..100 is the first hundred
-    // indices, and the highest index that can be reached is 2147483647.
+    // Half-open, like the Rust range it becomes: 0..100 is the first hundred.
     if start >= end {
         return Err(format!(
             "--indices {text:?}: the window is empty — start must be below end"
@@ -287,30 +269,27 @@ fn index(text: &str, which: &str) -> Result<u32, String> {
     Ok(n)
 }
 
-/// Whether a line is an attempt at a mnemonic rather than at a key.
+/// Whether a line is an attempt at a mnemonic rather than a key.
 ///
 /// Deliberately just "more than one word": a 13-word line is a mnemonic with a
-/// word missing, and saying so is far more useful than calling it a bad hex key.
+/// word missing, which is more useful to report than a bad hex key.
 pub fn looks_like_mnemonic(line: &str) -> bool {
     line.split_whitespace().count() > 1
 }
 
 /// A parsed phrase and the seed it unlocks.
 ///
-/// Parsing is separated from derivation because the seed alone identifies the
-/// wallet: a phrase repeated in the input file can be recognized as a duplicate
-/// without paying for its thousands of child keys a second time.
+/// Parsing is separate from derivation because the seed alone identifies the
+/// wallet: a repeated phrase is recognized as a duplicate without deriving its
+/// child keys a second time.
 pub struct Phrase {
     mnemonic: Mnemonic,
     seed: [u8; 64],
     words: usize,
 }
 
-/// Parse a phrase under a passphrase.
-///
-/// The passphrase is BIP39's 25th word: a different one produces an entirely
-/// different wallet from the same phrase, which is why it takes part in the
-/// wallet's identity as well as its keys.
+/// Parse a phrase under a passphrase — BIP39's 25th word, which produces an
+/// entirely different wallet and so takes part in the wallet's identity.
 pub fn parse(raw: &str, passphrase: &str) -> Result<Phrase, String> {
     let words = raw.split_whitespace().count();
     if !WORD_COUNTS.contains(&words) {
@@ -319,8 +298,8 @@ pub fn parse(raw: &str, passphrase: &str) -> Result<Phrase, String> {
             list_of(&WORD_COUNTS)
         ));
     }
-    // Checksum failures land here too, which is the useful case: a phrase with
-    // one wrong word has the right length and fails only this step.
+    // Checksum failures land here: a phrase with one wrong word has the right
+    // length and fails only this step.
     let mnemonic = Mnemonic::parse_in(Language::English, raw)
         .map_err(|e| format!("not a valid mnemonic ({e})"))?;
 
@@ -341,11 +320,10 @@ impl Phrase {
 
     /// Derive every address in the plan.
     ///
-    /// Each key in the tree is expanded into all five encodings rather than
-    /// only the one its purpose implies. The two are independent: a key at
-    /// `m/44'/0'/0'/0/3` is a perfectly good taproot key, and a wallet that
-    /// derived under one purpose and paid to another format is exactly the
-    /// mistake that leaves coins stranded and unfindable.
+    /// Each key is expanded into all five encodings rather than only the one
+    /// its purpose implies: a key at `m/44'/0'/0'/0/3` is a perfectly good
+    /// taproot key, and a wallet that derived under one purpose and paid to
+    /// another format is exactly what leaves coins stranded.
     pub fn derive(
         &self,
         secp: &Secp256k1<All>,
@@ -355,8 +333,8 @@ impl Phrase {
         let addresses = self.walk(secp, plan, BARE_KEY_KINDS.len(), |prefix, index, key| {
             let path = format!("{prefix}/{index}");
             let secret_hex = hex_of(&key.secret_bytes());
-            // One public key for all five encodings: they are views of the same
-            // point, and computing that point is what a key costs.
+            // One public key for all five encodings: computing that point is
+            // what a key costs.
             let public = PublicForms::of(secp, key);
             BARE_KEY_KINDS.map(|kind| Derived {
                 kind,
@@ -377,15 +355,14 @@ impl Phrase {
     /// Walk every key the plan names, expanding each through `per_key`, and
     /// concatenate the results in derivation order.
     ///
-    /// The shape of the walk is a branch node per account, purpose and chain,
-    /// each taken across its own span's windows: exactly the keys a scan is
-    /// expected to check, in the order it checks them.
+    /// The walk is a branch node per account, purpose and chain, each taken
+    /// across its own span's windows.
     fn walk<T, I>(
         &self,
         secp: &Secp256k1<All>,
         plan: &Plan,
         // How many items `per_key` returns, so every vector below is allocated
-        // once: a wide plan is millions of them.
+        // once — a wide plan is millions of them.
         items_per_key: usize,
         per_key: impl Fn(&str, u32, SecretKey) -> I + Sync,
     ) -> Result<Vec<T>, String>
@@ -395,11 +372,10 @@ impl Phrase {
     {
         let master = Xpriv::new_master(Network::Bitcoin, &self.seed).map_err(|e| e.to_string())?;
 
-        // The branch nodes first, sequentially: there are a handful of them and
-        // every index below hangs off one, so this is the shared prefix of all
-        // the work that follows. Purpose outermost, then account, so the two
-        // hardened steps a purpose and its coin type cost are paid once however
-        // many accounts hang beneath them — and so the paths come back sorted.
+        // The branch nodes first, sequentially: a handful of them, and every
+        // index below hangs off one. Purpose outermost, then account, so a
+        // purpose and its coin type cost their two hardened steps once however
+        // many accounts hang beneath them, and the paths come back sorted.
         let mut branches = Vec::with_capacity(plan.branches());
         for purpose in PURPOSES {
             let coin = master
@@ -407,8 +383,8 @@ impl Phrase {
                 .map_err(|e| e.to_string())?;
 
             for (account, span) in plan.accounts() {
-                // The third hardened step, and the last shared one: both chains
-                // hang off this node.
+                // The third and last shared hardened step; both chains hang
+                // off this node.
                 let node = coin
                     .derive_priv(
                         secp,
@@ -428,15 +404,16 @@ impl Phrase {
             }
         }
 
-        // The branches are independent and each is thousands of key operations,
-        // so they run in parallel. Collected per branch and concatenated in
-        // order afterwards, which keeps the output identical to a serial run.
-        // A narrow span is walked on one thread. Rayon splits work down to
-        // single items, which is what makes a wide span fast and a narrow one
-        // slower than doing it sequentially: a wordlist scanned an index deep
-        // is eight keys per phrase, and handing those to sixteen cores costs
-        // more in scheduling than deriving them. At that size the parallelism
-        // that pays is across phrases, and the caller is already applying it.
+        // The branches are independent and each is thousands of key
+        // operations, so they run in parallel, collected per branch and
+        // concatenated in order to keep the output identical to a serial run.
+        //
+        // A narrow span is walked on one thread instead. Rayon splits work down
+        // to single items, which makes a wide span fast and a narrow one slower
+        // than running it sequentially: a wordlist scanned one index deep is
+        // eight keys per phrase, and scheduling those across sixteen cores
+        // costs more than deriving them. At that size the parallelism that pays
+        // is across phrases, which the caller already applies.
         let per_branch_min = if plan.keys_per_mnemonic() < MIN_KEYS_PER_TASK {
             plan.branches()
         } else {
@@ -467,8 +444,8 @@ impl Phrase {
     /// Every key under one branch node, in index order.
     ///
     /// The indices within a branch are independent too, so each window is
-    /// walked in parallel; the collect is over an indexed range, which is what
-    /// keeps the result in index order regardless of scheduling.
+    /// walked in parallel; collecting over an indexed range keeps the result in
+    /// index order regardless of scheduling.
     fn branch_walk<T, I>(
         secp: &Secp256k1<All>,
         prefix: &str,
@@ -481,10 +458,9 @@ impl Phrase {
         I: IntoIterator<Item = T> + Send,
         T: Send,
     {
-        // The branch's own public key, which every child below it needs: BIP32
-        // derives a normal child from the *parent's* public key, and asking the
-        // library for one child at a time would recompute it once per index —
-        // a multiplication per key, for a point that never changes.
+        // The branch's own public key, which every child needs: BIP32 derives
+        // a normal child from the parent's public key, and asking the library
+        // for one child at a time would recompute this point per index.
         let parent = branch.private_key.public_key(secp).serialize();
 
         let mut walked = Vec::with_capacity(capacity);
@@ -504,29 +480,26 @@ impl Phrase {
     }
 }
 
-/// The fewest keys worth giving a thread of its own. Below this the derivation
-/// is cheaper than the scheduling around it.
+/// The fewest keys worth a thread of their own; below this the derivation is
+/// cheaper than the scheduling around it.
 const MIN_KEYS_PER_TASK: usize = 512;
 
 /// The normal child of a branch node at one index.
 ///
-/// This is BIP32's CKDpriv, written out rather than called through
-/// `Xpriv::derive_priv` for one reason: that method takes the parent's public
-/// key from the parent key itself, so a walk of a hundred thousand indices under
-/// one node recomputes the same point a hundred thousand times. Passing the
-/// serialized parent key in turns the per-index cost into an HMAC and a scalar
-/// addition. The result is asserted equal to `derive_priv`'s in the tests below.
+/// BIP32's CKDpriv, written out rather than called through `Xpriv::derive_priv`
+/// because that method recomputes the parent's public key per index. Passing
+/// the serialized parent in turns the per-index cost into an HMAC and a scalar
+/// addition; the tests below assert the result matches `derive_priv`.
 fn child_key(branch: &Xpriv, parent: &[u8; 33], index: u32) -> Result<SecretKey, String> {
-    // Rejects the hardened half of the space, which a normal child cannot
-    // reach and which the spans never name.
+    // Rejects the hardened half, which a normal child cannot reach.
     let child = ChildNumber::from_normal_idx(index).map_err(|e| e.to_string())?;
     let mut engine = HmacEngine::<sha512::Hash>::new(&branch.chain_code[..]);
     engine.input(parent);
     engine.input(&u32::from(child).to_be_bytes());
     let tweak = Hmac::from_engine(engine).to_byte_array();
 
-    // The left half is the tweak, the right half the child's chain code, which
-    // a walk one level deep has no use for.
+    // The left half is the tweak; the right half is the child's chain code,
+    // which a walk one level deep has no use for.
     branch
         .private_key
         .add_tweak(
@@ -557,9 +530,8 @@ fn list_of(counts: &[usize]) -> String {
 }
 
 #[cfg(test)]
-// A one-window expectation really is a one-element array of ranges here, which
-// is the shape `windows()` returns; the lint is warning about a mistake these
-// assertions are not making.
+// A one-window expectation really is a one-element array of ranges here, the
+// shape `windows()` returns.
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
@@ -567,18 +539,16 @@ mod tests {
     use std::collections::HashSet;
 
     /// The BIP39 test-vector phrase, whose BIP44/49/84/86 addresses are
-    /// published in the BIPs themselves.
+    /// published in the BIPs.
     const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon \
                           abandon abandon abandon abandon about";
 
-    /// A span from its written form, so the tests exercise the same parser the
-    /// command line goes through.
+    /// A span from its written form, so tests exercise the command line's parser.
     fn span(spec: &str) -> Span {
         spec.parse().unwrap_or_else(|e| panic!("{spec:?}: {e}"))
     }
 
-    /// Account 0 alone, at the given span — the shape every assertion below
-    /// about paths and counts was written against.
+    /// Account 0 alone, at the given span.
     fn only_account_zero(span: &Span) -> Plan {
         Plan::of(vec![(0, span.clone())])
     }
@@ -642,9 +612,9 @@ mod tests {
             only_account_zero(&span).addresses_per_mnemonic()
         );
 
-        // The BIP44 key, which a purpose-bound scan would only ever check as
-        // P2PKH, is reachable under all five encodings — and they are all the
-        // same key, so a hit on any of them reports one secret.
+        // The BIP44 key, which a purpose-bound scan would only check as P2PKH,
+        // is reachable under all five encodings — all the same key, so a hit on
+        // any of them reports one secret.
         let path = "m/44'/0'/0'/0/0";
         let at_path: Vec<&Derived> = entry
             .addresses
@@ -661,18 +631,16 @@ mod tests {
         let distinct: HashSet<&str> = at_path.iter().map(|d| d.address.as_str()).collect();
         assert_eq!(distinct.len(), BARE_KEY_KINDS.len());
 
-        // Cross-checked against `keys::derive` run on that child's hex: the
-        // BIP44 key reached through the tree and the same key fed in bare
-        // produce the same segwit address.
+        // Cross-checked against `keys::derive` on that child's hex: the key
+        // reached through the tree and fed in bare give the same address.
         assert_eq!(
             address_at(&entry, path, AddressKind::P2wpkh),
             "bc1qmxrw6qdh5g3ztfcwm0et5l8mvws4eva24kmp8m"
         );
     }
 
-    /// The accounts above 0 are a branch of the tree nothing else reaches, so
-    /// they are held against an independent derivation of the same paths rather
-    /// than against this code's own output.
+    /// The accounts above 0 are held against published derivations of the same
+    /// paths rather than against this code's own output.
     #[test]
     fn walks_the_accounts_above_zero() {
         let plan = Plan::of(vec![
@@ -702,9 +670,8 @@ mod tests {
         }
     }
 
-    /// Every account is asked the same question in the opening pass: nothing
-    /// about account 0 says whether a second wallet was ever made, so nothing
-    /// about account 0 decides how deep the others are looked at.
+    /// Nothing about account 0 says whether a second wallet was ever made, so
+    /// the opening pass asks every account the same question.
     #[test]
     fn the_opening_plan_walks_every_account_at_the_same_span() {
         let ten = span("10");
@@ -719,8 +686,7 @@ mod tests {
             ]
         );
 
-        // Which makes the cost of the account axis exactly linear — an account
-        // is a whole second copy of the scan, and is priced like one.
+        // Which makes the account axis exactly linear in cost.
         assert_eq!(
             plan.addresses_per_mnemonic(),
             4 * only_account_zero(&ten).addresses_per_mnemonic()
@@ -735,8 +701,8 @@ mod tests {
         assert_eq!(Plan::opening(&ten, 1), only_account_zero(&ten));
     }
 
-    /// Explicit windows name exactly which indices are wanted, and that is a
-    /// question about indices — every account is still asked it.
+    /// Explicit windows are a question about indices, so every account is
+    /// still asked it.
     #[test]
     fn explicit_windows_reach_every_account_too() {
         for spec in ["10..110", "400000..500000,2147483548.."] {
@@ -757,15 +723,15 @@ mod tests {
             entry.addresses.len(),
             only_account_zero(&span).addresses_per_mnemonic()
         );
-        // The far end is why the span has two ends; assert it is reached.
+        // The far end is why a span has two ends; assert it is reached.
         for path in ["m/84'/0'/0'/0/2147483647", "m/84'/0'/0'/1/2147483646"] {
             assert!(!address_at(&entry, path, AddressKind::P2wpkh).is_empty());
         }
     }
 
-    /// `child_key` is BIP32's CKDpriv written out, so it is held against the
-    /// library's own derivation — including at the ends of the index space,
-    /// where a mistake in the index encoding would show up.
+    /// `child_key` is CKDpriv written out, so it is held against the library's
+    /// own derivation — including at the ends of the index space, where a
+    /// mistake in the index encoding would show up.
     #[test]
     fn the_hand_rolled_child_matches_the_library() {
         let secp = Secp256k1::new();
@@ -788,12 +754,12 @@ mod tests {
             );
         }
         // A hardened index is not a normal child and must be refused, not
-        // silently derived as if the high bit were part of the number.
+        // derived as if the high bit were part of the number.
         assert!(child_key(&branch, &parent, HARDENED).is_err());
     }
 
-    /// The indices a span reaches on one branch, which is what the windows
-    /// actually mean once they reach the tree.
+    /// The indices a span reaches on one branch — what the windows mean once
+    /// they reach the tree.
     fn indices_of(spec: &str) -> Vec<u32> {
         let span = span(spec);
         let entry = scan("", &span);
@@ -814,7 +780,7 @@ mod tests {
     #[test]
     fn a_window_can_start_anywhere() {
         // Ten ahead of where a scan normally starts, and stopping short of the
-        // very last indices — neither of which a bare count can express.
+        // last indices — neither of which a bare count can express.
         assert_eq!(indices_of("10..13"), [10, 11, 12]);
         assert_eq!(
             indices_of("2147483645..2147483647"),
@@ -829,9 +795,8 @@ mod tests {
 
     #[test]
     fn windows_are_sorted_and_fused() {
-        // Given out of order and overlapping, an index must still be derived
-        // exactly once: a repeat would be a wasted request as well as a wasted
-        // derivation.
+        // Given out of order and overlapping, an index is still derived once:
+        // a repeat wastes a request as well as a derivation.
         assert_eq!(indices_of("20..22,0..2,1..3"), [0, 1, 2, 20, 21]);
         // Touching windows fuse rather than sitting adjacent.
         assert_eq!(span("0..2,2..4").windows(), [0..4]);
@@ -848,11 +813,9 @@ mod tests {
         );
         // Whitespace around the parts, which a quoted shell value makes easy.
         assert_eq!(span(" 5..7 , 9..11 ").windows(), [5..7, 9..11]);
-        // Both bounds left off is the whole space — the same thing `..` means
-        // in Rust, and reachable anyway as `0..2147483648`.
+        // Both bounds left off is the whole space, as `..` means in Rust.
         assert_eq!(span("..").windows(), [0..HARDENED]);
-        // A count past the end of the space is the whole space, not an error:
-        // it is a count, and there are only so many indices to count.
+        // A count past the end of the space is the whole space, not an error.
         assert_eq!(span("2147483648").windows(), [0..HARDENED]);
 
         for bad in [
@@ -900,8 +863,8 @@ mod tests {
         );
     }
 
-    /// The step is what `--expand` sets, so a round has to follow it rather
-    /// than the default: reaching out to the next multiple of whatever it is.
+    /// A round reaches out to the next multiple of whatever `--expand` set,
+    /// not of the default.
     #[test]
     fn a_custom_step_sets_how_far_a_round_reaches() {
         use End::{Far, Near};
@@ -922,8 +885,8 @@ mod tests {
         // Nothing left: the whole space is already covered by the two ends.
         assert_eq!(next_window(Near, HARDENED, 0, STEP), None);
         assert_eq!(next_window(Far, HARDENED, 0, STEP), None);
-        // The ends meet in the middle rather than crossing and re-deriving:
-        // the last near round is clipped to where the far end has reached.
+        // The ends meet rather than crossing: the last near round is clipped
+        // to where the far end reached.
         let far = HARDENED - 150;
         assert_eq!(next_window(Near, 100, far, STEP), Some(100..150));
         assert_eq!(next_window(Near, 150, far, STEP), None);
@@ -932,10 +895,8 @@ mod tests {
         assert_eq!(next_window(Near, 400, far, STEP), Some(400..450));
     }
 
-    /// The branches and the indices within them are derived in parallel, so the
-    /// order the addresses come back in is asserted rather than assumed: the
-    /// output groups by path prefix, and a scheduling-dependent order would
-    /// scramble it.
+    /// Branches and the indices within them derive in parallel, so the order
+    /// addresses come back in is asserted rather than assumed.
     #[test]
     fn addresses_come_back_in_derivation_order() {
         let entry = scan("", &span("2"));
@@ -958,10 +919,9 @@ mod tests {
         assert_eq!(paths, expected);
 
         // With several accounts the grouping is purpose, then account, then
-        // chain — the order the branch nodes are derived in, which is what lets
-        // a purpose's first two hardened steps be paid for once.
-        // One index rather than the count of one used above, which would mean
-        // both ends and put the far index between the accounts.
+        // chain — the order the branch nodes are derived in. One index rather
+        // than the count used above, which would mean both ends and put the far
+        // index between the accounts.
         let first = Span::of(vec![0..1]);
         let entry = scan_plan("", &Plan::of(vec![(0, first.clone()), (2, first)]));
         let paths: Vec<&str> = entry
@@ -983,8 +943,8 @@ mod tests {
         assert_eq!(paths, expected);
     }
 
-    /// `unwrap_err` would need `Phrase: Debug`, which would put a seed into any
-    /// panic message. Matched by hand instead so secrets stay unprintable.
+    /// `unwrap_err` needs `Phrase: Debug`, which would put a seed into a panic
+    /// message. Matched by hand so secrets stay unprintable.
     fn rejection(raw: &str) -> String {
         match parse(raw, "") {
             Ok(_) => panic!("expected {raw:?} to be rejected"),
@@ -1013,8 +973,8 @@ mod tests {
 
     #[test]
     fn every_defined_word_count_parses() {
-        // Built from entropy rather than written out, so each phrase is a real
-        // one of its length with a checksum that is right by construction.
+        // Built from entropy, so each phrase has a valid checksum by
+        // construction.
         for (bytes, expected_words) in [(16, 12), (20, 15), (24, 18), (28, 21), (32, 24)] {
             let phrase = Mnemonic::from_entropy(&vec![0u8; bytes])
                 .unwrap()
@@ -1031,8 +991,8 @@ mod tests {
         assert_eq!(err, "13 words: a mnemonic has 12, 15, 18, 21 or 24");
     }
 
-    /// A span that reaches across the whole index space covers it once, not
-    /// twice: the count shorthand overlaps at 2^30 and the windows must fuse.
+    /// A span across the whole index space covers it once: the count shorthand
+    /// overlaps at 2^30, and the windows must fuse.
     #[test]
     fn spans_do_not_derive_an_index_twice() {
         for spec in [

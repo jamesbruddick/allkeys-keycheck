@@ -1,13 +1,11 @@
 //! The `allkeys-keycheck.toml` config file.
 //!
-//! Every command-line option can also be written here, so a repeated scan is
-//! one file and a bare `allkeys-keycheck` rather than a line of flags to
-//! remember. Secrets live in their own table, so the file as a whole is what
-//! needs locking down once any of them is filled in.
+//! Every command-line option can also be written here, so a repeated scan runs
+//! from a bare `allkeys-keycheck`. Secrets live in their own table.
 //!
 //! Precedence is command line → environment variable → config file → default.
-//! The file is the weakest layer on purpose: a stale line in it must never
-//! override a flag typed on the spot.
+//! The file is the weakest layer, so a stale line in it never overrides a flag
+//! typed on the spot.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -24,12 +22,10 @@ pub const DEFAULT_FILE: &str = "allkeys-keycheck.toml";
 pub const TEMPLATE: &str = include_str!("../allkeys-keycheck.toml.example");
 
 /// How far a phrase that turned something up is followed past the count it was
-/// scanned at — or off, taking a count as exactly the indices it names.
+/// scanned at, or off, taking a count as exactly the indices it names.
 ///
-/// One setting rather than a size and a switch beside it. The two are not
-/// independent: a round size means nothing once expansion is off, so a separate
-/// off-switch only creates a contradiction to be written and then caught. Here
-/// there is nothing to contradict, on the command line or in the file.
+/// One setting rather than a size plus a switch: a round size means nothing
+/// once expansion is off, so a separate off-switch could only contradict it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Expand {
     Off,
@@ -54,9 +50,8 @@ impl Default for Expand {
     }
 }
 
-/// What a value has to be wrong in, either surface, said once. A round of no
-/// indices is refused rather than treated as off: it reads as a size, and a
-/// size of zero would scan nothing round after round.
+/// What a bad value is told, on either surface. A round of no indices is
+/// refused rather than read as off, since it would scan nothing forever.
 const EXPAND_EXPECTED: &str =
     "how far each expansion round reaches, in indices, or false to not expand at all";
 
@@ -91,7 +86,7 @@ impl fmt::Display for Expand {
 }
 
 /// `expand = 400` and `expand = false` are both natural TOML, so both are
-/// taken, along with the string a `--expand` copied into the file would be.
+/// accepted, along with the string form a copied `--expand` would leave.
 impl<'de> Deserialize<'de> for Expand {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
@@ -130,8 +125,8 @@ impl<'de> Deserialize<'de> for Expand {
     }
 }
 
-/// The file's contents. Every field is optional: a config that sets one value
-/// and leaves the rest to the defaults is the normal case, not a partial file.
+/// The file's contents. Every field is optional — setting one value and
+/// leaving the rest to the defaults is the normal case.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
@@ -153,8 +148,8 @@ pub struct Config {
     pub secrets: Secrets,
 }
 
-/// The values worth keeping off the command line, where they would land in
-/// shell history and in the process list.
+/// Values worth keeping off the command line, where they would land in shell
+/// history and the process list.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Secrets {
@@ -163,8 +158,7 @@ pub struct Secrets {
     pub allkeys_api_key: Option<String>,
 }
 
-/// A loaded config, and where it came from, so the run can name the file in
-/// its banner and in any warning about it.
+/// A loaded config and the path it came from, so the run can name the file.
 pub struct Loaded {
     pub path: Option<PathBuf>,
     pub config: Config,
@@ -189,8 +183,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded, String> {
         }
     };
 
-    // A file named on the command line and not there is worth saying plainly,
-    // rather than through an OS error about a path the user just typed.
+    // Said plainly, rather than through an OS error about a path just typed.
     let text = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => format!("no config file at {}", path.display()),
         _ => format!("could not read {}: {e}", path.display()),
@@ -217,8 +210,8 @@ pub fn write_template(path: &Path) -> Result<(), String> {
     write_private(path, TEMPLATE).map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
-/// Create at `0600`: the file is written to hold API keys, so it should not be
-/// readable by other users from the moment it exists.
+/// Create at `0600`: the file holds API keys, so it must not be readable by
+/// other users from the moment it exists.
 #[cfg(unix)]
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
@@ -237,9 +230,9 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
-/// toml renders an error as a position, a drawing of the offending line, and
-/// then what is actually wrong with it. The UI prints errors as one row, so
-/// keep the two ends — where, and why — and drop the drawing between them.
+/// toml renders an error as a position, a drawing of the offending line, then
+/// what is wrong with it. The UI prints errors as one row, so keep the two ends
+/// — where and why — and drop the drawing between them.
 fn one_line(e: &toml::de::Error) -> String {
     let text = e.to_string();
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
@@ -256,16 +249,15 @@ fn one_line(e: &toml::de::Error) -> String {
 mod tests {
     use super::*;
 
-    /// The template is meant to be copied and run as it stands, so a broken
-    /// one is a broken first run. What it sets is checked in `main`, against
-    /// the defaults it is supposed to be spelling out.
+    /// The template is copied and run as it stands, so a broken one is a
+    /// broken first run. `main` checks the values it sets against the defaults.
     #[test]
     fn the_shipped_template_parses() {
         let config: Config = toml::from_str(TEMPLATE).expect("template must be a valid config");
         assert!(config.input.is_some());
 
         // Every secret stays commented out: an empty API key would be sent and
-        // rejected, where a missing one fails before the scan starts.
+        // rejected, where a missing one fails before the scan.
         assert!(config.secrets.passphrase.is_none());
         assert!(config.secrets.blockchain_api_key.is_none());
         assert!(config.secrets.allkeys_api_key.is_none());
@@ -278,12 +270,11 @@ mod tests {
         assert!(config.api_batch.is_none());
     }
 
-    /// A typo in a key must be reported, not silently ignored — a passphrase
-    /// that never applied would look exactly like a wallet that was empty.
+    /// A typo in a key is reported, not ignored: a passphrase that never
+    /// applied would look exactly like an empty wallet.
     #[test]
     fn an_unknown_key_is_rejected() {
-        // Not `unwrap_err`: that would need Debug on Config, and a Debug on a
-        // struct holding API keys is one stray `{:?}` away from printing them.
+        // Not `unwrap_err`: that needs Debug on Config, which holds API keys.
         let Err(e) = toml::from_str::<Config>("passphrase = \"oops\"\n") else {
             panic!("a key outside [secrets] must not be accepted");
         };
